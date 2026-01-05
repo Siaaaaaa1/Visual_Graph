@@ -23,6 +23,7 @@ from agent_system.environments.prompts import *
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SimpleMemory, SearchMemory
 from omegaconf import OmegaConf
+from agent_system.environments.env_manager_graph_search import GraphSearchEnvironmentManager
 
 def parse_gamefile(infos):
     gamefile = []
@@ -609,7 +610,7 @@ def make_envs(config):
     group_n = config.env.rollout.n if config.env.rollout.n > 0 else 1
     resources_per_worker = OmegaConf.to_container(config.env.resources_per_worker, resolve=True)
 
-    if "search" in config.env.env_name.lower():
+    if "aaasearch" in config.env.env_name.lower():
         from agent_system.environments.env_package.search import build_search_envs, search_projection
         _envs = build_search_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
         _val_envs = build_search_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
@@ -618,6 +619,35 @@ def make_envs(config):
         envs = SearchEnvironmentManager(_envs, projection_f, config)
         val_envs = SearchEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
+
+    elif "graph_search" in config.env.env_name.lower():
+        from agent_system.environments.env_package.graph_search.envs import build_graph_search_envs
+        from agent_system.environments.env_package.graph_search.projection import graph_search_projection
+        from agent_system.environments.env_manager_graph_search import GraphSearchEnvironmentManager
+
+        _envs = build_graph_search_envs(
+            seed=config.env.seed,
+            env_num=config.data.train_batch_size,
+            group_n=group_n,
+            is_train=True,
+            env_config=config.env,
+        )
+
+        _val_envs = build_graph_search_envs(
+            seed=config.env.seed + 1000,
+            env_num=config.data.val_batch_size,
+            group_n=1,
+            is_train=False,
+            env_config=config.env,
+        )
+
+        projection_f = partial(graph_search_projection)
+
+        envs = GraphSearchEnvironmentManager(_envs, projection_f, config)
+        val_envs = GraphSearchEnvironmentManager(_val_envs, projection_f, config)
+
+        return envs, val_envs
+
     elif "gym_cards" in config.env.env_name.lower():
         from agent_system.environments.env_package.gym_cards import build_gymcards_envs, gym_projection
         _envs = build_gymcards_envs(env_name=config.env.env_name, seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, resources_per_worker=resources_per_worker)
