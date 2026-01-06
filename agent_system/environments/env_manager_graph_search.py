@@ -20,7 +20,7 @@ Predict the category of the CENTER node.
 
 You may:
 - directly answer if you are confident, or
-- inspect ONE neighbor node text per step to gather more evidence.
+- inspect one or multiple neighbor node texts per step to gather more evidence.
 
 Follow the interaction rules strictly.
 """
@@ -35,13 +35,18 @@ GRAPH_SEARCH_TEMPLATE_NO_HIS = """{task_instruction}
 Initial state:
 {initial_state}
 
-You must choose exactly ONE action in the following format:
+You may choose EXACTLY ONE action:
 
 <action>view_node:<node_id></action>
-or
+<action>view_nodes:[<node_id_1>,<node_id_2>,...,<node_id_k>]</action>  (k ≤ 5)
 <action>final:<category_name></action>
 
-Do NOT output anything else.
+You must output ONLY the action.
+
+You may reason internally before acting, but you MUST output ONLY the final action
+wrapped in <action>...</action> tags.
+
+Do NOT include your reasoning or any other text outside the action tags.
 """
 
 
@@ -55,13 +60,18 @@ History (previous actions and observations):
 
 Current step: {step_count}
 
-You must choose exactly ONE action in the following format:
+You may choose EXACTLY ONE action:
 
 <action>view_node:<node_id></action>
-or
+<action>view_nodes:[<node_id_1>,<node_id_2>,...,<node_id_k>]</action>  (k ≤ 5)
 <action>final:<category_name></action>
 
-Do NOT output anything else.
+You must output ONLY the action.
+
+You may reason internally before acting, but you MUST output ONLY the final action
+wrapped in <action>...</action> tags.
+
+Do NOT include your reasoning or any other text outside the action tags.
 """
 
 
