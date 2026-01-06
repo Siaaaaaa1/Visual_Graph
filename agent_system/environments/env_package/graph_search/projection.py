@@ -8,6 +8,12 @@ _ACTION_BLOCK = re.compile(
 
 _ACTION_TAG = re.compile(r"<action>", re.IGNORECASE)
 
+# 新增：multi-node 解析用的正则
+_VIEW_NODE_RE = re.compile(r"^view_node:(\d+)$")
+_VIEW_NODES_RE = re.compile(r"^view_nodes:\[(.*?)\]$")
+
+MAX_NODES_PER_STEP = 5
+
 
 def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
     """
@@ -15,8 +21,8 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
       actions: LLM 原始输出（batch）
 
     输出：
-      results: 抽取出的 action 字符串（如 'view_node:28'）
-      valids : 0/1，表示该 action 是否合法
+      results: 抽取出的 action 字符串（如 'view_node:28' 或 'view_nodes:[28,41]'）
+      valids : 0/1，表示该 action 是否合法（语法 + 基本约束）
     """
     results: List[str] = []
     valids: List[int] = [1] * len(actions)
@@ -37,12 +43,43 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
 
         action = m.group(1).strip()
 
-        # 3. 基本合法性校验（语法层，不是语义层）
-        if ":" not in action:
-            results.append("")
-            valids[i] = 0
+        # 3. view_node:<id>
+        m_single = _VIEW_NODE_RE.match(action)
+        if m_single:
+            results.append(action)
             continue
 
-        results.append(action)
+        # 4. view_nodes:[id1,id2,...]
+        m_multi = _VIEW_NODES_RE.match(action)
+        if m_multi:
+            content = m_multi.group(1).strip()
+            if not content:
+                results.append("")
+                valids[i] = 0
+                continue
+
+            try:
+                node_ids = [int(x.strip()) for x in content.split(",")]
+            except ValueError:
+                results.append("")
+                valids[i] = 0
+                continue
+
+            if len(node_ids) == 0 or len(node_ids) > MAX_NODES_PER_STEP:
+                results.append("")
+                valids[i] = 0
+                continue
+
+            results.append(action)
+            continue
+
+        # 5. final:<category>
+        if action.startswith("final:"):
+            results.append(action)
+            continue
+
+        # 6. 其他情况：非法
+        results.append("")
+        valids[i] = 0
 
     return results, valids

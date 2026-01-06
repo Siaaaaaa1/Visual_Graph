@@ -38,19 +38,16 @@ class GraphSearchEnv:
         self.image_bytes = kwargs["image_bytes"]
 
         self.legend = kwargs["legend"]
-        #self.color_distribution = kwargs["color_distribution"]
+
         color_dist = kwargs["color_distribution"]
         if isinstance(color_dist, str):
             color_dist = json.loads(color_dist)
         self.color_distribution = color_dist
 
         inspectable = kwargs["inspectable_nodes"]
-
         if isinstance(inspectable, str):
             inspectable = json.loads(inspectable)
 
-
-        
         self.inspectable_nodes = (
             set(inspectable.get("1hop", []))
             | set(inspectable.get("2hop", []))
@@ -58,9 +55,7 @@ class GraphSearchEnv:
 
         self.answer = kwargs["answer"]
 
-        # Initial observation:
-        # - includes center node ID as an anchor
-        # - does NOT include neighbor texts
+        # Initial observation (NO neighbor texts)
         obs = (
             f"Center node ID: {self.center_id}\n"
             f"Center node text:\n{self.center_text}\n\n"
@@ -88,24 +83,41 @@ class GraphSearchEnv:
 
         reward = 0
         done = False
+        obs = ""
 
         # --------------------------------------------------
-        # view_node action (information acquisition)
+        # view_node / view_nodes action (information acquisition)
         # --------------------------------------------------
+        node_ids = None
+
         if action.startswith("view_node:"):
             try:
-                node_id = int(action.split(":", 1)[1])
+                node_ids = [int(action.split(":", 1)[1])]
             except Exception:
-                obs = "Invalid node id format."
-            else:
+                node_ids = None
+
+        elif action.startswith("view_nodes:"):
+            try:
+                content = action.split(":", 1)[1].strip()
+                content = content.lstrip("[").rstrip("]")
+                node_ids = [int(x.strip()) for x in content.split(",") if x.strip()]
+            except Exception:
+                node_ids = None
+
+        if node_ids is not None:
+            texts = []
+
+            for node_id in node_ids:
                 if node_id not in self.inspectable_nodes:
-                    obs = f"Node {node_id} is not inspectable."
+                    texts.append(f"Node {node_id} is not inspectable.")
                 elif node_id in self.seen_nodes:
-                    obs = f"Node {node_id} has already been inspected."
+                    texts.append(f"Node {node_id} has already been inspected.")
                 else:
                     self.seen_nodes.add(node_id)
                     text = self.node_text_db.get(str(node_id), "")
-                    obs = f"Text of node {node_id}:\n{text}"
+                    texts.append(f"Text of node {node_id}:\n{text}")
+
+            obs = "\n\n".join(texts)
 
         # --------------------------------------------------
         # final action (task completion attempt)
@@ -146,7 +158,7 @@ class GraphSearchEnv:
 # ============================================================
 
 def build_graph_search_envs(
-    seed: int,          # ← 新增，但可以不用
+    seed: int,
     env_num: int,
     group_n: int,
     is_train: bool,
@@ -154,11 +166,6 @@ def build_graph_search_envs(
 ):
     """
     Build batched graph-search environments.
-
-    This function mirrors the role of build_search_envs:
-    - dataset-driven reset
-    - batched step/reset
-    - reward semantics delegated to single env
     """
     batch_size = env_num * group_n
     max_steps = env_config.max_steps
@@ -176,13 +183,13 @@ def build_graph_search_envs(
     ]
 
     class BatchGraphSearchEnv:
-        # def reset(self, kwargs_list: List[Dict[str, Any]]):
-        #     text_obs, image_obs, infos = [], [], []
         def __init__(self):
             self.num_envs = batch_size
+
         def reset(self, kwargs):
             kwargs_list = kwargs
             text_obs, image_obs, infos = [], [], []
+
             for env, kw in zip(envs, kwargs_list):
                 obs = env.reset(kw)
                 text_obs.append(obs)
