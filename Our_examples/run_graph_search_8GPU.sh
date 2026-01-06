@@ -16,8 +16,8 @@ python3 -m examples.data_preprocess.prepare \
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=./datasets/train.parquet \
-    data.val_files=./datasets/test.parquet \
+    data.train_files=./datasets/pubmed_train.parquet \
+    data.val_files=./datasets/pubmed_test.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=8092 \
@@ -64,4 +64,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
-    trainer.val_before_train=True $@
+    trainer.val_before_train=True \
+    env.node_text_path=./datasets/pubmed_text.json

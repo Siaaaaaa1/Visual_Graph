@@ -294,6 +294,7 @@ env:
   seed: 0
   max_steps: 50
   history_length: 2
+  node_text_path: null
   resources_per_worker: # resources for each env worker
     num_cpus: 0.1
     num_gpus: 0
@@ -314,3 +315,4 @@ env:
   webshop:
     use_small: True
     human_goals: False
+    
