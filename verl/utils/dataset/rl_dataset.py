@@ -48,7 +48,7 @@ def collate_fn(data_list: list[dict]) -> dict:
     """
     tensors = defaultdict(list)
     non_tensors = defaultdict(list)
-
+    is_dataset_phase = all("center_id" in data for data in data_list)
     for data in data_list:
         for key, val in data.items():
             if isinstance(val, torch.Tensor):
@@ -61,6 +61,24 @@ def collate_fn(data_list: list[dict]) -> dict:
 
     for key, val in non_tensors.items():
         non_tensors[key] = np.array(val, dtype=object)
+
+    if is_dataset_phase:
+        env_kwargs = []
+
+        for data in data_list:
+            env_kwargs.append({
+                "center_id": data["center_id"],
+                "center_text": data["center_text"],
+                "image_bytes": data["image_bytes"],
+                "legend": data["legend"],
+                "color_distribution": data["color_distribution"],
+                "inspectable_nodes": data["inspectable_nodes"],
+                "answer": data["answer"],
+                "split": data.get("split", None),  # 如果你 parquet 里有就加
+            })
+
+        # 注意：env_kwargs 是 List[Dict]，不要转成 np.array
+        non_tensors["env_kwargs"] = env_kwargs
 
     return {**tensors, **non_tensors}
 
