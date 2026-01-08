@@ -1048,7 +1048,12 @@ class RayPPOTrainer:
             for batch_dict in self.train_dataloader:
                 metrics = {}
                 timing_raw = {}
+                env_kwargs = None
+                if isinstance(batch_dict, dict) and "env_kwargs" in batch_dict:
+                    env_kwargs = batch_dict.pop("env_kwargs")               
                 batch: DataProto = DataProto.from_single_dict(batch_dict)
+                if env_kwargs is not None:
+                    batch.non_tensor_batch["env_kwargs"] = env_kwargs
 
                 # pop those keys for generation
                 batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
