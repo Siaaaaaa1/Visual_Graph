@@ -1,6 +1,8 @@
 import json
 from typing import List, Dict, Any
-
+import io
+import numpy as np
+from PIL import Image
 
 # ============================================================
 # Single-episode Graph Search Environment
@@ -36,7 +38,9 @@ class GraphSearchEnv:
         self.center_id = kwargs["center_id"]
         self.center_text = kwargs["center_text"]
         self.image_bytes = kwargs["image_bytes"]
-
+        img = Image.open(io.BytesIO(self.image_bytes)).convert("RGB")
+        #img = img.resize((64, 64), resample=Image.BICUBIC)
+        self.image = np.array(img)  # shape: (H, W, 3), dtype: uint8
         self.legend = kwargs["legend"]
 
         color_dist = kwargs["color_distribution"]
@@ -149,6 +153,7 @@ class GraphSearchEnv:
             "step": self.step_count,
             "seen_nodes": list(self.seen_nodes),
         }
+        info["won"] = bool(done)
 
         return obs, reward, done, info
 
@@ -193,7 +198,8 @@ def build_graph_search_envs(
             for env, kw in zip(envs, kwargs_list):
                 obs = env.reset(kw)
                 text_obs.append(obs)
-                image_obs.append(kw["image_bytes"])
+                #image_obs.append(kw["image_bytes"])
+                image_obs.append(env.image)
                 infos.append({})
 
             return text_obs, image_obs, infos
@@ -205,7 +211,8 @@ def build_graph_search_envs(
             for env, act in zip(envs, actions):
                 obs, r, d, info = env.step(act)
                 text_obs.append(obs)
-                image_obs.append(env.image_bytes)
+                #image_obs.append(env.image_bytes)
+                image_obs.append(env.image)
                 rewards.append(r)
                 dones.append(d)
                 infos.append(info)
