@@ -65,4 +65,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
     trainer.val_before_train=True \
-    env.node_text_path=./datasets/pubmed_text.json
+    env.node_text_path=./datasets/pubmed_text.json \
+    env.dataset_name='pubmed'
