@@ -10,7 +10,7 @@ PT_FILE_PATH = "./origin_datasets/graph_data_all.pt"
 # 目标处理的数据集名称
 # 注意：截图里是 Industrial，但你要求处理 arxiv。
 # 请确保 .pt 文件里包含 'arxiv' 这个 key，或者根据实际情况修改列表。
-TARGET_DATASETS = ["cora", "pubmed", "arxiv"] 
+TARGET_DATASETS = ["pubmed", "arxiv"] 
 
 OUTPUT_DIR = "./datasets"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -62,6 +62,11 @@ def process_dataset(dataset_name, data_obj):
     if hasattr(data_obj, 'val_mask'):   apply_mask(data_obj.val_mask, "val")
     if hasattr(data_obj, 'test_mask'):  apply_mask(data_obj.test_mask, "test")
 
+    node_features = None
+    if hasattr(data_obj, 'x') and data_obj.x is not None:
+        # 放到 CPU，转 float16，减小 JSON 体积
+        node_features = data_obj.x.detach().cpu().to(torch.float16)
+
     # 3. 处理边信息 (Edge Index -> Adjacency List)
     # 对于 Agent 来说，知道“邻居是谁”比知道全局 Edge Index 更重要
     print(f"  - Building adjacency list for {num_nodes} nodes...")
@@ -100,6 +105,7 @@ def process_dataset(dataset_name, data_obj):
             "text": text_map.get(str_id, ""),
             # 从 proxy.json 获取额外信息
             "proxy_info": proxy_map.get(str_id, {}),
+            "feature": node_features[i].tolist(),
             # 邻居列表
             "neighbors": adj[i]
         }
