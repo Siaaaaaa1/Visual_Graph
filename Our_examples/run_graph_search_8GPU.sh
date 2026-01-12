@@ -21,8 +21,8 @@ group_size=8
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$DATA_DIR/pubmed_train_slim.parquet \
-    data.val_files=$DATA_DIR/pubmed_test_slim.parquet \
+    data.train_files=datasets/pubmed_train_slim.parquet \
+    data.val_files=datasets/pubmed_test_slim.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=8092 \
