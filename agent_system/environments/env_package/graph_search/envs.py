@@ -2,6 +2,9 @@ import json
 import random
 from typing import List, Dict, Any, Tuple, Optional
 from .graph_visualizer import GraphVisualizer
+from PIL import Image
+import io
+import numpy as np
 
 # ============================================================
 # 单回合图搜索环境
@@ -30,7 +33,7 @@ class GraphSearchEnv:
         self.step_count = 0
         self.seen_nodes = set()
         self.done = False
-        self.current_image_bytes = None
+        self.current_image = None
         # ✅ 新增: 每个 Episode 生成一个随机 Seed，用于控制本局的颜色风格
         self.episode_color_seed = random.randint(0, 1000000)
 
@@ -61,7 +64,8 @@ class GraphSearchEnv:
             max_nodes=10,
             color_seed=self.episode_color_seed # ✅ 保持一致性
         )
-        self.current_image_bytes = img_bytes
+        #self.current_image_bytes = img_bytes
+        self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
         legend_str = self._format_legend(legend_dict)
 
         obs = (
@@ -106,7 +110,8 @@ class GraphSearchEnv:
                     max_nodes=max_nodes,
                     color_seed=self.episode_color_seed # ✅ 使用相同的 seed
                 )
-                self.current_image_bytes = img_bytes
+                #self.current_image_bytes = img_bytes
+                self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
                 legend_str = self._format_legend(legend_dict)
                 
                 obs = f"Graph view updated (Mode: {hop_mode}, Rank: {rank_mode}, Max: {max_nodes}).\nLegend: {legend_str}"
@@ -209,7 +214,7 @@ def build_graph_search_envs(
             for env, kw in zip(envs, kwargs):
                 obs = env.reset(kw)
                 text_obs.append(obs)
-                image_obs.append(env.current_image_bytes)
+                image_obs.append(env.current_image)
                 infos.append({})
             return text_obs, image_obs, infos
 
@@ -218,7 +223,7 @@ def build_graph_search_envs(
             for env, act in zip(envs, actions):
                 obs, r, d, info = env.step(act)
                 text_obs.append(obs)
-                image_obs.append(env.current_image_bytes)
+                image_obs.append(env.current_image)
                 rewards.append(r)
                 dones.append(d)
                 infos.append(info)
