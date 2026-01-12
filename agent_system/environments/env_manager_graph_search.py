@@ -37,7 +37,7 @@ Follow the interaction rules strictly.
 
 
 # =========================
-# 2. Prompt 模板
+# 2. Prompt 模板 (CoT via <think> tags)
 # =========================
 
 GRAPH_SEARCH_TEMPLATE_NO_HIS = """{task_instruction}
@@ -60,8 +60,13 @@ You may choose EXACTLY ONE action from the following list:
    <action>final:<category_name></action>
    (Use the EXACT category name from the legend.)
 
-You must output ONLY the action wrapped in <action>...</action> tags.
-Do NOT include your reasoning or any other text outside the action tags.
+Response Format:
+1. First, analyze the image and text to decide your next step. Wrap your reasoning inside <think>...</think> tags.
+2. Then, on a new line, output the chosen action wrapped in <action>...</action> tags.
+
+Example:
+<think>The center node is connected to several blue nodes, but I need to verify their text content to be sure about the category.</think>
+<action>check_nodes:[12, 45]</action>
 """
 
 
@@ -90,8 +95,13 @@ You may choose EXACTLY ONE action from the following list:
    <action>final:<category_name></action>
    (Use the EXACT category name from the legend.)
 
-You must output ONLY the action wrapped in <action>...</action> tags.
-Do NOT include your reasoning or any other text outside the action tags.
+Response Format:
+1. First, review the history and analyze the current state. Wrap your reasoning inside <think>...</think> tags.
+2. Then, on a new line, output the chosen action wrapped in <action>...</action> tags.
+
+Example:
+<think>I have already checked the text of node 12 in the previous step. Now I need to see a broader view of the graph structure.</think>
+<action>check_graph:2-hop,sim,20</action>
 """
 
 
