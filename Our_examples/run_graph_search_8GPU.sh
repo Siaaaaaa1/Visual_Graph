@@ -25,7 +25,7 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=datasets/pubmed_test_slim.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
-    data.max_prompt_length=8092 \
+    data.max_prompt_length=6144 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
