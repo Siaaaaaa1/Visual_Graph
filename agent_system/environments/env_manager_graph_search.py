@@ -20,7 +20,7 @@ Predict the category of the CENTER node.
 You have the following tools to gather information:
 
 1. **Check Node Text**: Inspect the text content of specific nodes.
-2. **Check Graph View**: Update the visual graph (<image>) to focus on different aspects.
+2. **Check Graph View**: Update the visual graph to focus on different aspects.
    - Hop Mode:
        * '1-hop': only immediate neighbors
        * '2-hop': include both 1-hop and 2-hop neighbors
