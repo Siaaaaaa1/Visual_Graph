@@ -59,20 +59,33 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
             valids[i] = 0
             continue
 
-        # 4. check_graph:<mode>[,<max>]
+        # 4. check_graph:<hop_mode>,<rank_mode>,<max_nodes>
         if action.startswith("check_graph:"):
-            # 简单校验格式
             try:
                 params = action.split(":", 1)[1].split(",")
-                mode = params[0].strip()
-                if mode in ["1-hop", "2-hop", "sim", "1-hop+sim"]:
-                    results.append(action)
-                    continue
+
+                # 必须正好 3 个参数
+                if len(params) != 3:
+                    raise ValueError
+
+                hop_mode = params[0].strip()     # "1-hop" | "2-hop"
+                rank_mode = params[1].strip()    # "hop" | "sim"
+                max_nodes = int(params[2].strip())
+
+                if hop_mode not in ["1-hop", "2-hop"]:
+                    raise ValueError
+                if rank_mode not in ["hop", "sim"]:
+                    raise ValueError
+                if max_nodes <= 0:
+                    raise ValueError
+
+                results.append(action)
+                continue
             except:
-                pass
-            results.append("")
-            valids[i] = 0
-            continue
+                results.append("")
+                valids[i] = 0
+                continue
+
 
         # 5. final:<category>
         if action.startswith("final:"):

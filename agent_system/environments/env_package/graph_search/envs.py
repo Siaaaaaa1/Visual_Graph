@@ -14,7 +14,7 @@ class GraphSearchEnv:
                  dataset_name: str, 
                  dataset_dir: str,
                  shared_graph_data: Optional[Tuple[Dict, Dict]] = None):
-        
+                   
         self.max_steps = max_steps
         self.node_text_db = node_text_db
         
@@ -90,22 +90,28 @@ class GraphSearchEnv:
             try:
                 # 格式: check_graph:mode,max_nodes
                 # 例如: check_graph:2-hop,20 或 check_graph:1-hop
+
                 params = action.split(":", 1)[1].strip().split(",")
-                mode = params[0].strip()
-                max_nodes = int(params[1].strip()) if len(params) > 1 else 15
+
+                # 新语义：check_graph:hop_mode,rank_mode,max_nodes
+                hop_mode = params[0].strip()
+                rank_mode = params[1].strip() if len(params) > 1 else "hop"
+                max_nodes = int(params[2].strip()) if len(params) > 2 else 15
+
                 
                 img_bytes, legend_dict = self.visualizer.draw_subgraph(
                     self.center_id,
-                    mode=mode,
+                    mode=hop_mode,
+                    rank_mode=rank_mode,
                     max_nodes=max_nodes,
                     color_seed=self.episode_color_seed # ✅ 使用相同的 seed
                 )
                 self.current_image_bytes = img_bytes
                 legend_str = self._format_legend(legend_dict)
                 
-                obs = f"Graph view updated (Mode: {mode}, Max: {max_nodes}).\nLegend: {legend_str}"
+                obs = f"Graph view updated (Mode: {hop_mode}, Rank: {rank_mode}, Max: {max_nodes}).\nLegend: {legend_str}"
             except Exception as e:
-                obs = f"Error in check_graph: {str(e)}. Use format: check_graph:mode,max_nodes"
+                obs = f"Error in check_graph: {str(e)}. Use format: check_graph:hop_mode,rank_mode,max_nodes"
 
         # 动作 2: check_node / check_nodes
         elif action.startswith("check_node:") or action.startswith("check_nodes:"):

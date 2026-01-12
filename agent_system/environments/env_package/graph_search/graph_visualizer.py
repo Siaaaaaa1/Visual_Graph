@@ -161,7 +161,7 @@ class GraphVisualizer:
             for nb2 in nb_neighbors:
                 if nb2 != node_id and nb2 not in undirected_1hop:
                     undirected_2hop.add(nb2)
-                    
+    
         return {
             "in_degree": in_degree,
             "out_degree": out_degree,
@@ -175,7 +175,7 @@ class GraphVisualizer:
         mode: str = "1-hop",
         max_nodes: int = 50,
         color_seed: int = 42,  # ✅ 接收外部传入的 Seed
-        rank_mode: str = "hop_then_sim", #sim_only or hop_then_sim
+        rank_mode: str = "hop", #sim or hop
         undirected: bool = True
     ) -> Tuple[bytes, Dict[str, str]]:
 
@@ -212,7 +212,7 @@ class GraphVisualizer:
             for nid in unique_candidates
         }
 
-        if rank_mode == "sim_only":
+        if rank_mode == "sim":
             # 模式 A：完全按相似度排序
             unique_candidates = sorted(
                 unique_candidates,
@@ -220,7 +220,7 @@ class GraphVisualizer:
                 reverse=True
             )
 
-        elif rank_mode == "hop_then_sim":
+        elif rank_mode == "hop":
             # 模式 B：1-hop 优先，其次 2-hop；同一 hop 内按相似度
             one_hop = [n for n in unique_candidates if n in one_hop_set]
             two_hop = [n for n in unique_candidates if n not in one_hop_set]
