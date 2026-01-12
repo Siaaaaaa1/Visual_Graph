@@ -69,12 +69,7 @@ def collate_fn(data_list: list[dict]) -> dict:
             env_kwargs.append({
                 "center_id": data["center_id"],
                 "center_text": data["center_text"],
-                "image_bytes": data["image_bytes"],
-                "legend": data["legend"],
-                "color_distribution": data["color_distribution"],
-                "inspectable_nodes": data["inspectable_nodes"],
                 "answer": data["answer"],
-                "split": data.get("split", None),  # 如果你 parquet 里有就加
             })
 
         # 注意：env_kwargs 是 List[Dict]，不要转成 np.array
