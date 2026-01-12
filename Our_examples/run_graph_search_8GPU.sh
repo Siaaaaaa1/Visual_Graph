@@ -21,7 +21,7 @@ python3 -m verl.trainer.main_ppo \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=8092 \
-    data.max_response_length=512 \
+    data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
@@ -60,7 +60,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.project_name='verl_agent_graph_search' \
     trainer.experiment_name='graph_search_qwen2.5_1.5b' \
     trainer.n_gpus_per_node=2 \
-    trainer.nnodes=1 \
+    trainer.nnodes=8 \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
