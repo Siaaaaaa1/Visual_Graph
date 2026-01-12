@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Tuple
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SearchMemory
 
-
 # =========================
 # 1. 固定任务指令 (System / Instruction)
 # =========================
@@ -22,8 +21,16 @@ You have the following tools to gather information:
 
 1. **Check Node Text**: Inspect the text content of specific nodes.
 2. **Check Graph View**: Update the visual graph (<image>) to focus on different aspects.
-   - Modes: '1-hop' (immediate neighbors), '2-hop' (wider context), 'sim' (similarity-based layout).
+   - Hop Mode:
+       * '1-hop': only immediate neighbors
+       * '2-hop': include both 1-hop and 2-hop neighbors
+   - Rank Mode:
+       * 'hop': prioritize closer hops (1-hop before 2-hop)
+       * 'sim': prioritize nodes by semantic similarity to the center node
    - Max Nodes: Integer limit for the number of nodes to draw (e.g., 10, 20).
+
+When submitting the final answer, use the EXACT category name shown in the legend (case-insensitive).
+Do NOT paraphrase or modify the category name.
 
 Follow the interaction rules strictly.
 """
@@ -45,12 +52,13 @@ You may choose EXACTLY ONE action from the following list:
    <action>check_nodes:[<node_id_1>,<node_id_2>,...,<node_id_k>]</action>  (k ≤ 5)
 
 2. Update Graph Visualization:
-   <action>check_graph:<mode>,<max_nodes></action>
-   Example: <action>check_graph:2-hop,20</action>
-   (Valid modes: 1-hop, 2-hop, sim)
+   <action>check_graph:<hop_mode>,<rank_mode>,<max_nodes></action>
+   Example: <action>check_graph:2-hop,sim,20</action>
+   (Valid hop_mode: 1-hop, 2-hop; Valid rank_mode: hop, sim)
 
 3. Submit Answer:
    <action>final:<category_name></action>
+   (Use the EXACT category name from the legend.)
 
 You must output ONLY the action wrapped in <action>...</action> tags.
 Do NOT include your reasoning or any other text outside the action tags.
@@ -74,12 +82,13 @@ You may choose EXACTLY ONE action from the following list:
    <action>check_nodes:[<node_id_1>,<node_id_2>,...,<node_id_k>]</action>  (k ≤ 5)
 
 2. Update Graph Visualization:
-   <action>check_graph:<mode>,<max_nodes></action>
-   Example: <action>check_graph:2-hop,20</action>
-   (Valid modes: 1-hop, 2-hop, sim)
+   <action>check_graph:<hop_mode>,<rank_mode>,<max_nodes></action>
+   Example: <action>check_graph:2-hop,sim,20</action>
+   (Valid hop_mode: 1-hop, 2-hop; Valid rank_mode: hop, sim)
 
 3. Submit Answer:
    <action>final:<category_name></action>
+   (Use the EXACT category name from the legend.)
 
 You must output ONLY the action wrapped in <action>...</action> tags.
 Do NOT include your reasoning or any other text outside the action tags.
