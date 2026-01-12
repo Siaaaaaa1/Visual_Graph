@@ -2,22 +2,27 @@ set -x
 ENGINE=${1:-vllm}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 
-num_cpus_per_env_worker=0.1 # The CPU resource allocated for each environment worker. If you want to use less CPU resources, you can decrease this value.
+# 1. 明确定义数据路径，确保前后一致
+DATA_DIR="./datasets"
+mkdir -p $DATA_DIR
 
+num_cpus_per_env_worker=0.1
 train_data_size=16
 val_data_size=128
 group_size=8
 
-# We only use data preparation to indicate the modality and the data size.
-python3 -m examples.data_preprocess.prepare \
-    --mode 'text' \
-    --train_data_size $train_data_size \
-    --val_data_size $val_data_size
+# 2. 数据预处理 (确保 prepare.py 能接收 --local_dir 参数)
+# 注意: 请检查 examples.data_preprocess.prepare 是否有实际代码，否则此步骤无效
+# python3 -m examples.data_preprocess.prepare \
+#     --mode 'text' \
+#     --local_dir $DATA_DIR \
+#     --train_data_size $train_data_size \
+#     --val_data_size $val_data_size
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=./datasets/pubmed_train.parquet \
-    data.val_files=./datasets/pubmed_test.parquet \
+    data.train_files=$DATA_DIR/train.parquet \
+    data.val_files=$DATA_DIR/test.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=8092 \
@@ -59,11 +64,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_agent_graph_search' \
     trainer.experiment_name='graph_search_qwen2.5_1.5b' \
-    trainer.n_gpus_per_node=2 \
-    trainer.nnodes=8 \
+    trainer.n_gpus_per_node=8 \
+    trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=5 \
     trainer.total_epochs=150 \
     trainer.val_before_train=True \
-    env.node_text_path=./datasets/pubmed_text.json \
+    env.node_text_path=$DATA_DIR/pubmed_text.json \
     env.dataset_name='pubmed'
