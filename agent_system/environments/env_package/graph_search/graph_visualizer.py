@@ -60,6 +60,14 @@ class GraphVisualizer:
         self.BASE_FIG_SIZE = 10
         self.NODE_SCALE_FACTOR = 0.05
         
+        # --- [新增] 分辨率控制参数 ---
+        # 限制画布尺寸（英寸），防止节点过多导致图片无限变大
+        self.MIN_FIG_SIZE = 8.0   
+        self.MAX_FIG_SIZE = 20.0  
+        # 固定 DPI (Dots Per Inch)，控制像素密度
+        # 最终像素 = FIG_SIZE * DPI。例如 Max 20 * 100 = 2000px 宽/高
+        self.DPI = 100            
+        
         # 1. Tab10 色板 (适用于类别数 <= 10)
         self.cmap10 = plt.get_cmap("tab10")
         self.colors10 = self.cmap10.colors
@@ -238,9 +246,6 @@ class GraphVisualizer:
 
         # =========================================================
         # 【STEP A】2-hop 强制树化 (Visual Tree-ification)
-        # 目的：为了清晰展示，强制将图结构转化为类树状结构。
-        # 策略：为每个 2-hop 节点只保留一个 "Anchor" (父节点)，
-        #       该 Anchor 必须是与其相连的 1-hop 节点中最相似的一个。
         # =========================================================
 
         two_hop_anchor = {}
@@ -289,7 +294,6 @@ class GraphVisualizer:
                 G.add_edge(anchor, child)
 
         # 边 C: 弱连接 (可选)
-        # 在同一层的 2-hop 节点之间添加权重很低的边，让布局算法稍微拉近它们，但不造成视觉混乱
         TWO_HOP_EDGE_WEIGHT = 0.2   
         for u in final_nodes:
             if u == center_id or u in one_hop_set: continue
@@ -308,11 +312,10 @@ class GraphVisualizer:
         color_mapping = self._get_color_map_for_episode(sorted_classes, color_seed)
 
         # --- 布局初始化 (Bias Initialization) ---
-        # 目的：利用相似度信息初始化位置，辅助 spring_layout 更快收敛到语义合理的布局
         pos_init = {}
         pos_init[center_id] = np.array([0.0, 0.0])
 
-        rng = np.random.RandomState(42) # 布局位置使用固定种子，保证同一步骤多次渲染位置不变
+        rng = np.random.RandomState(42)
 
         R_MIN, R_MAX = 0.6, 1.8 
         for u in one_hop_set:
@@ -359,9 +362,18 @@ class GraphVisualizer:
                 if c_name not in legend_dict:
                     legend_dict[c_name] = pred_class
 
-        # 设置画布
-        fig_size = self.BASE_FIG_SIZE + len(final_nodes) * self.NODE_SCALE_FACTOR
-        fig = plt.figure(figsize=(fig_size, fig_size))
+        # =========================================================
+        # 【修改点】 图像尺寸控制
+        # =========================================================
+        
+        # 1. 计算基于节点数量的理论尺寸
+        calculated_size = self.BASE_FIG_SIZE + len(final_nodes) * self.NODE_SCALE_FACTOR
+        
+        # 2. 强制限制在 [MIN, MAX] 范围内
+        final_fig_size = np.clip(calculated_size, self.MIN_FIG_SIZE, self.MAX_FIG_SIZE)
+        
+        # 3. 设置 Figure 尺寸和 DPI
+        fig = plt.figure(figsize=(final_fig_size, final_fig_size), dpi=self.DPI)
 
         nx.draw_networkx_edges(G, pos, alpha=0.3)
         nx.draw_networkx_nodes(
@@ -391,7 +403,8 @@ class GraphVisualizer:
             buf,
             format="png",
             bbox_inches="tight",
-            pad_inches=0
+            pad_inches=0,
+            dpi=self.DPI  # 确保保存时使用指定的 DPI
         )
         plt.close(fig)
         
