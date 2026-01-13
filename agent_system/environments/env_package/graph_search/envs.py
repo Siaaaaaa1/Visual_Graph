@@ -78,6 +78,11 @@ class GraphSearchEnv:
             color_seed=self.episode_color_seed 
         )
         
+        infos = {
+            "center_id": self.center_id,
+            "answer": self.answer,
+            "step": self.step_count
+        }
         # 转换为 Numpy 数组供 VLM 处理
         self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
         legend_str = self._format_legend(legend_dict)
@@ -242,9 +247,9 @@ def build_graph_search_envs(
         def step(self, actions: List[str]):
             text_obs, image_obs, rewards, dones, infos = [], [], [], [], []
             for env, act in zip(envs, actions):
-                obs, r, d, info = env.step(act)
+                obs, img, r, d, info = env.step(act)
                 text_obs.append(obs)
-                image_obs.append(env.current_image)
+                image_obs.append(img)
                 rewards.append(r)
                 dones.append(d)
                 infos.append(info)
