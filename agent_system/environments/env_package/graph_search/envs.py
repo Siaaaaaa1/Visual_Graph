@@ -187,7 +187,7 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
 
-        return obs, self.current_image, reward, done, info
+        return obs, reward, done, info
 
 
 # ============================================================
@@ -247,9 +247,9 @@ def build_graph_search_envs(
         def step(self, actions: List[str]):
             text_obs, image_obs, rewards, dones, infos = [], [], [], [], []
             for env, act in zip(envs, actions):
-                obs, img, r, d, info = env.step(act)
+                obs, r, d, info = env.step(act)
                 text_obs.append(obs)
-                image_obs.append(img)
+                image_obs.append(env.current_image)
                 rewards.append(r)
                 dones.append(d)
                 infos.append(info)
