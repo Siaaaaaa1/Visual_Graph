@@ -25,7 +25,7 @@ def inspect_parquet(file_path, num_rows=5):
     print(df)
 
 # 替换成你的文件路径
-file_path = "/Users/sianeko/vscode/verl-agent/datasets/pubmed_train_slim.parquet" 
+file_path = "/Users/sianeko/vscode/verl-agent/datasets/pubmed_test_slim.parquet" 
 try:
     inspect_parquet(file_path)
 except Exception as e:
