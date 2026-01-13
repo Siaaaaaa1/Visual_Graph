@@ -67,8 +67,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
-    trainer.test_freq=5 \
+    trainer.test_freq=50 \
     trainer.total_epochs=150 \
-    trainer.val_before_train=True \
+    trainer.val_before_train=false \
     env.node_text_path=$DATA_DIR/pubmed_text.json \
     env.dataset_name='pubmed'
