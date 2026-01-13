@@ -63,17 +63,17 @@ def collate_fn(data_list: list[dict]) -> dict:
         non_tensors[key] = np.array(val, dtype=object)
 
     if is_dataset_phase:
-        env_kwargs = []
+        env_kwargs_list = []
 
         for data in data_list:
-            env_kwargs.append({
+            env_kwargs_list.append({
                 "center_id": data["center_id"],
                 "center_text": data["center_text"],
                 "answer": data["answer"],
             })
 
         # 注意：env_kwargs 是 List[Dict]，不要转成 np.array
-        non_tensors["env_kwargs"] = env_kwargs
+        non_tensors["env_kwargs"] = np.array(env_kwargs_list, dtype=object)
 
     return {**tensors, **non_tensors}
 
