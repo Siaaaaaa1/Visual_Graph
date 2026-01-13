@@ -54,6 +54,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
+    actor_rollout_ref.rollout.load_format=hf \
     algorithm.use_kl_in_reward=False \
     env.env_name=graph_search/GraphSearchEnv \
     env.seed=0 \
