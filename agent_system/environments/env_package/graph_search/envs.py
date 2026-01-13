@@ -93,7 +93,7 @@ class GraphSearchEnv:
             f"Initial Graph View (1-hop, max 10 nodes):\n{legend_str}\n"
         )
 
-        return obs
+        return obs, self.current_image, infos
 
     def step(self, action: str):
         if self.done:
@@ -182,7 +182,7 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
 
-        return obs, reward, done, info
+        return obs, self.current_image, reward, done, info
 
 
 # ============================================================
