@@ -260,8 +260,8 @@ trainer:
   balance_batch: True
   total_epochs: 30
   total_training_steps: null
-  project_name: verl_examples
-  experiment_name: gsm8k
+  project_name: Visual_Graph
+  experiment_name: test0114
   logger: [ 'console', 'wandb' ]
   log_val_generations: 0
   rollout_data_dir: null # directory for logging the rollout data, no dump if null
