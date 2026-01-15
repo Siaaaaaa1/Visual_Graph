@@ -5,7 +5,7 @@ export WANDB_API_KEY="wandb_v1_ZTns6OSyX32BuWQZW1pJAwdfXWq_gigglo2wSf7KtvTrcIiO9
 # 1. 明确定义数据路径，确保前后一致
 mkdir -p $DATA_DIR
 
-num_cpus_per_env_worker=0.1
+num_cpus_per_env_worker=0.5
 train_data_size=16
 val_data_size=128
 group_size=8
