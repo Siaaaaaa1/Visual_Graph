@@ -3,7 +3,6 @@ ENGINE=${1:-vllm}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_API_KEY="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"
 # 1. 明确定义数据路径，确保前后一致
-DATA_DIR="./datasets"
 mkdir -p $DATA_DIR
 
 num_cpus_per_env_worker=0.1
@@ -21,8 +20,8 @@ group_size=8
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$DATA_DIR/pubmed_train_slim.parquet \
-    data.val_files=$DATA_DIR/pubmed_test_slim.parquet \
+    data.train_files=./datasets/pubmed_train_slim.parquet \
+    data.val_files=./datasets/pubmed_test_slim.parquet \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
     data.max_prompt_length=6144 \
@@ -30,7 +29,7 @@ python3 -m verl.trainer.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.model.path=/mmu_cd_ssd/zhangzhenyu06/workspace/EasyR1/models/Qwen2.5-VL-3B-Instruct \
+    actor_rollout_ref.model.path=./models/Qwen2.5-VL-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=256 \
@@ -64,12 +63,12 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='verl_agent_graph_search' \
-    trainer.experiment_name='graph_search_qwen2.5_1.5b' \
+    trainer.experiment_name='graph_search_qwen2.5_7b' \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=50 \
     trainer.total_epochs=150 \
     trainer.val_before_train=false \
-    env.node_text_path=$DATA_DIR/pubmed_text.json \
+    env.node_text_path=./datasets/pubmed_text.json \
     env.dataset_name='pubmed'
