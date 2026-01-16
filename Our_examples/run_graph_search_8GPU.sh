@@ -2,8 +2,9 @@ set -x
 ENGINE=${1:-vllm}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_API_KEY="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"
+# export MASTER_ADDRESS=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 
-num_cpus_per_env_worker=0.5
+num_cpus_per_env_worker=0.1
 train_data_size=16
 val_data_size=128
 group_size=8
@@ -69,4 +70,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=150 \
     trainer.val_before_train=false \
     env.node_text_path=./datasets/pubmed_text.json \
-    env.dataset_name='pubmed'
+    env.dataset_name='pubmed' \
+    ray_init.num_cpus=64
