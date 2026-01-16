@@ -2,8 +2,6 @@ set -x
 ENGINE=${1:-vllm}
 export VLLM_ATTENTION_BACKEND=XFORMERS
 export WANDB_API_KEY="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"
-# 1. 明确定义数据路径，确保前后一致
-mkdir -p $DATA_DIR
 
 num_cpus_per_env_worker=0.5
 train_data_size=16
