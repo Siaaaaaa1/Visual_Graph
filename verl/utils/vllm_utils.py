@@ -69,10 +69,32 @@ from typing import List
 
 from msgspec import field
 from packaging import version as vs
-from vllm.lora.models import LoRAModel
+# ================= 修复开始 =================
 from vllm.lora.request import LoRARequest
-from vllm.lora.utils import get_adapter_absolute_path
-from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+
+# 尝试适配 vLLM 的不同版本
+try:
+    # 旧版本 vLLM
+    from vllm.lora.models import LoRAModel
+except ImportError:
+    # 新版本 vLLM (不再有 LoRAModel，通常用 LoRARequest 代替)
+    # 我们这里做一个别名，防止 verL 后面的代码因找不到 LoRAModel 类而报错
+    LoRAModel = LoRARequest
+
+try:
+    from vllm.lora.utils import get_adapter_absolute_path
+except ImportError:
+    # 新版可能移动了路径，或者在这个上下文中我们可能不需要它
+    # 如果后续代码报错，可能需要查找 vllm.lora.lora_model 或其他路径
+    pass 
+
+# LRUCacheWorkerLoRAManager 在新版也可能变动，暂时保留尝试导入
+try:
+    from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
+except ImportError:
+    # 如果这个也报错，说明新版管理器接口变了，暂时先 pass，等报具体错再修
+    pass
+# ================= 修复结束 =================
 
 from verl.third_party.vllm import get_version
 

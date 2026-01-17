@@ -16,7 +16,7 @@ Note that we don't combine the main with ray_trainer as ray_trainer is used by o
 """
 
 import os
-
+import sys  # Added for flush
 import hydra
 import ray
 from omegaconf import OmegaConf
@@ -25,35 +25,41 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.constants_ppo import get_ppo_ray_runtime_env
 
-
 @hydra.main(config_path="config", config_name="ppo_trainer", version_base=None)
 def main(config):
     run_ppo(config)
 
 
 def run_ppo(config) -> None:
+    print(f"[DEBUG] Starting run_ppo...", flush=True)
     # Check if Ray is not initialized
     if not ray.is_initialized():
+        print(f"[DEBUG] Ray not initialized. Preparing to init...", flush=True)
         # Initialize Ray with a local cluster configuration
-        # Set environment variables in the runtime environment to control tokenizer parallelism,
-        # NCCL debug level, VLLM logging level, and allow runtime LoRA updating
-        # `num_cpus` specifies the number of CPU cores Ray can use, obtained from the configuration
         default_runtime_env = get_ppo_ray_runtime_env()
         ray_init_kwargs = config.get("ray_init", {})
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
-        print(f"ray init kwargs: {ray_init_kwargs}")
+        print(f"ray init kwargs: {ray_init_kwargs}", flush=True)
+        
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
+        print(f"[DEBUG] Ray initialized successfully.", flush=True)
+    else:
+        print(f"[DEBUG] Ray was already initialized.", flush=True)
 
+    print(f"[DEBUG] Creating remote TaskRunner...", flush=True)
     runner = TaskRunner.remote()
+    print(f"[DEBUG] TaskRunner created. Calling run()...", flush=True)
     ray.get(runner.run.remote(config))
+    print(f"[DEBUG] TaskRunner finished.", flush=True)
 
 
 @ray.remote(num_cpus=1)  # please make sure main_task is not scheduled on head
 class TaskRunner:
     def run(self, config):
+        print(f"[DEBUG] TaskRunner.run started inside Ray Worker.", flush=True)
         # print initial config
         from pprint import pprint
 
@@ -65,17 +71,23 @@ class TaskRunner:
         OmegaConf.resolve(config)
 
         # download the checkpoint from hdfs
+        print(f"[DEBUG] Starting copy_to_local (Model download) from {config.actor_rollout_ref.model.path}...", flush=True)
         local_path = copy_to_local(config.actor_rollout_ref.model.path, use_shm=config.actor_rollout_ref.model.get("use_shm", False))
+        print(f"[DEBUG] copy_to_local finished. Path: {local_path}", flush=True)
 
         from agent_system.environments import make_envs
+        print(f"[DEBUG] Starting make_envs (Creating environments)...", flush=True)
         envs, val_envs = make_envs(config)
+        print(f"[DEBUG] make_envs finished.", flush=True)
 
         # instantiate tokenizer
         from verl.utils import hf_processor, hf_tokenizer
 
+        print(f"[DEBUG] Loading Tokenizer and Processor...", flush=True)
         trust_remote_code = config.data.get("trust_remote_code", False)
         tokenizer = hf_tokenizer(local_path, trust_remote_code=trust_remote_code)
         processor = hf_processor(local_path, trust_remote_code=trust_remote_code, use_fast=True)  # used for multimodal LLM, could be none
+        print(f"[DEBUG] Tokenizer and Processor loaded.", flush=True)
 
         # vllm early verify
         if config.actor_rollout_ref.rollout.name in ["vllm"]:
@@ -86,6 +98,7 @@ class TaskRunner:
                     raise NotImplementedError("PPO LoRA is not supported before vllm 0.7.3")
 
         # define worker classes
+        print(f"[DEBUG] Defining Worker Classes and Resource Mapping...", flush=True)
         if config.actor_rollout_ref.actor.strategy in ["fsdp", "fsdp2"]:
             assert config.critic.strategy in ["fsdp", "fsdp2"]
             from verl.single_controller.ray import RayWorkerGroup
@@ -121,12 +134,6 @@ class TaskRunner:
             Role.Critic: global_pool_id,
         }
 
-        # we should adopt a multi-source reward function here
-        # - for rule-based rm, we directly call a reward score
-        # - for model-based rm, we call a model
-        # - for code related prompt, we send to a sandbox if there are test cases
-        # - finally, we combine all the rewards together
-        # - The reward type depends on the tag of the data
         if config.reward_model.enable:
             if config.reward_model.strategy in ["fsdp", "fsdp2"]:
                 from verl.workers.fsdp_workers import RewardModelWorker
@@ -149,10 +156,12 @@ class TaskRunner:
         else:
             raise NotImplementedError
 
+        print(f"[DEBUG] Initializing Reward Manager...", flush=True)
         reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=0, normalize_by_length=False)
 
         # Note that we always use function-based RM for validation
         val_reward_fn = reward_manager_cls(tokenizer=tokenizer, num_examine=1, normalize_by_length=False)
+        print(f"[DEBUG] Reward Manager initialized.", flush=True)
 
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
@@ -163,9 +172,14 @@ class TaskRunner:
 
         from verl.utils.dataset.rl_dataset import collate_fn
 
+        print(f"[DEBUG] Creating Train Dataset...", flush=True)
         train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
+        print(f"[DEBUG] Creating Val Dataset...", flush=True)
         val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
+        
         train_sampler = create_rl_sampler(config.data, train_dataset)
+        
+        print(f"[DEBUG] Initializing RayPPOTrainer...", flush=True)
         trainer = RayPPOTrainer(
             config=config,
             tokenizer=tokenizer,
@@ -184,11 +198,19 @@ class TaskRunner:
             envs=envs,
             val_envs=val_envs,
         )
+        
+        # This is where Resource Deadlock usually happens
+        print(f"[DEBUG] calling trainer.init_workers() (This requests GPUs from Ray)...", flush=True)
         trainer.init_workers()
+        print(f"[DEBUG] trainer.init_workers() DONE. Workers are alive.", flush=True)
+        
+        print(f"[DEBUG] calling trainer.fit() (Starting training loop)...", flush=True)
         trainer.fit()
+        print(f"[DEBUG] trainer.fit() finished.", flush=True)
 
 
 def create_rl_dataset(data_paths, data_config, tokenizer, processor):
+    print(f"[DEBUG] create_rl_dataset called for paths: {data_paths}", flush=True)
     """Create a dataset.
 
     Arguments:
@@ -213,12 +235,14 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
         dataset_cls = RLHFDataset
     print(f"Using dataset class: {dataset_cls.__name__}")
 
+    print(f"[DEBUG] Instantiating {dataset_cls.__name__} (This may read Parquet files)...", flush=True)
     dataset = dataset_cls(
         data_files=data_paths,
         tokenizer=tokenizer,
         processor=processor,
         config=data_config,
     )
+    print(f"[DEBUG] Dataset instantiated successfully. Size: {len(dataset) if hasattr(dataset, '__len__') else 'Unknown'}", flush=True)
 
     return dataset
 
