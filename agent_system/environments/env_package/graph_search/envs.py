@@ -36,7 +36,7 @@ class GraphSearchEnv:
         self.step_count = 0
         self.seen_nodes = set()
         self.done = False
-        self.current_image = None # 仅用于记录最近一次的图，不强制每步都发
+        self.current_image = None
         self.episode_color_seed = random.randint(0, 1000000)
 
     def _format_legend(self, legend_dict: Dict[str, str]) -> str:
@@ -180,7 +180,7 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
 
-        # 返回 obs (可能含 <image> 也可能不含), step_image (可能是 Image 也可能是 None)
+        # 返回 obs (可能含 <image> 也可能不含), step_image (可能是 Image 对象也可能是 None)
         return obs, step_image, reward, done, info
 
 
@@ -229,7 +229,7 @@ def build_graph_search_envs(
             for env, kw in zip(envs, kwargs):
                 obs, img, info = env.reset(kw)
                 text_obs.append(obs)
-                # Reset 必然有图，使用 copy() 确保独立对象
+                # Reset 必然有图，使用 copy() 确保独立对象 (虽然此时 img 是新生成的)
                 image_obs.append(img.copy())
                 infos.append(info)
             return text_obs, image_obs, infos
