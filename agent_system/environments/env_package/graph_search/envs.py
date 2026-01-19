@@ -65,7 +65,7 @@ class GraphSearchEnv:
         candidates = self.visualizer.get_candidate_classes(self.center_id, top_k=100)
         candidates_str = ", ".join(candidates)
         
-        # 3. 绘制初始视图 (Center Only)
+        # 3. 绘制初始视图 (Center Only) -> 满足“初始只有一个点”
         img_bytes, legend_dict = self.visualizer.draw_subgraph(
             self.center_id, 
             view_mode="center",  # 仅画中心
@@ -79,9 +79,11 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         
+        # 更新 current_image
         self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
         
         # 构建初始文本观察
+        # ✅ 必须包含 <image> 标签，因为我们返回了 self.current_image
         obs = (
             f"Current Agent Task: Classify Node {self.center_id}.\n"
             f"Center Node Info:\n"
@@ -90,6 +92,7 @@ class GraphSearchEnv:
             f"- 1-Hop Neighbors: {stats['neighbor_count_1hop']}\n\n"
             f"Candidate Categories (from surrounding context): {candidates_str}\n\n"
             f"Current View: Center Node Only. Use 'check_graph' to see neighbors.\n"
+            f"<image>" 
         )
 
         return obs, self.current_image, infos
@@ -109,9 +112,7 @@ class GraphSearchEnv:
         if action.startswith("check_graph:"):
             try:
                 # 预期格式: check_graph:view_mode,max_nodes
-                # 示例: check_graph:1-hop+sim,15
                 params = action.split(":", 1)[1].strip().split(",")
-
                 view_mode = params[0].strip()
                 max_nodes = int(params[1].strip())
 
@@ -122,6 +123,7 @@ class GraphSearchEnv:
                     color_seed=self.episode_color_seed 
                 )
                 
+                # 更新 current_image 为新视图
                 self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
                 legend_str = self._format_legend(legend_dict)
                 
@@ -131,6 +133,7 @@ class GraphSearchEnv:
 
         # 动作 B: check_node / check_nodes (查阅节点文本)
         elif action.startswith("check_node:") or action.startswith("check_nodes:"):
+            # 保持 self.current_image 不变 (即 "永远将最近一步生成的图像放到下一步")
             node_ids = []
             try:
                 content_str = action.split(":", 1)[1].strip()
@@ -158,12 +161,12 @@ class GraphSearchEnv:
             obs = "Final answer submitted."
             done = True
             self.done = True
-            
             if pred.lower() == self.answer.lower():
                 reward = 1
         else:
             obs = "Invalid action."
 
+        # 超时检查
         if not done and self.step_count >= self.max_steps:
             done = True
             self.done = True
@@ -173,6 +176,11 @@ class GraphSearchEnv:
             "seen_nodes": list(self.seen_nodes),
             "won": bool(reward)
         }
+
+        # ✅ 关键修正：无论什么动作，都追加 <image> 标签，
+        # 因为 BatchGraphSearchEnv.step 始终会发送 self.current_image。
+        # 这样文本中的 <image> 数量就和传入的图像数量一致了。
+        obs += "\n<image>"
 
         return obs, reward, done, info
 
@@ -231,6 +239,7 @@ def build_graph_search_envs(
             for env, act in zip(envs, actions):
                 obs, r, d, info = env.step(act)
                 text_obs.append(obs)
+                # ✅ 始终传递当前的图像 (current_image)
                 image_obs.append(env.current_image)
                 rewards.append(r)
                 dones.append(d)
