@@ -112,22 +112,33 @@ Example:
 class GraphSearchEnvironmentManager(EnvironmentManagerBase):
     """
     EnvironmentManager for GraphSearch.
+    Manages text history AND image history to ensure multi-turn alignment.
     """
 
     def __init__(self, envs, projection_f, config):
         self.memory = SearchMemory()
         super().__init__(envs, projection_f, config)
+        # 新增：用于存储每个环境的历史图片列表
+        # 结构: self.image_history[batch_idx] = [Img1, Img2, ...]
+        self.image_history = [] 
 
     def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
-        # text_obs 是初始状态描述，image_obs 是 list of bytes
+        # text_obs 是初始状态描述，image_obs 是 list of numpy arrays
         text_obs, image_obs, infos = self.envs.reset(kwargs=kwargs)
 
         self.initial_states = text_obs
         self.memory.reset(batch_size=len(text_obs))
+        
+        # ✅ 初始化图片历史，并将 Reset 产生的初始图片存入
+        self.image_history = [[] for _ in range(len(text_obs))]
+        for i, img in enumerate(image_obs):
+            if img is not None:
+                self.image_history[i].append(img)
 
         observations = {
             "text": self.build_text_obs(init=True),
-            "image": image_obs,
+            # ✅ 返回完整的图片历史列表，供 VLM 对齐 Prompt 中的所有 <image> 标签
+            "image": self.image_history,
             "anchor": text_obs.copy(),
         }
 
@@ -138,6 +149,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         actions, valids = self.projection_f(text_actions)
 
         # 2) Environment Step
+        # next_image_obs 里的元素可能是 Image (如果 check_graph) 或 None (如果 check_node)
         next_text_obs, next_image_obs, rewards, dones, infos = self.envs.step(actions)
 
         # 3) Memory Store
@@ -145,11 +157,17 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             "search": actions,
             "information": next_text_obs,
         })
+        
+        # ✅ 维护图片历史：只有当本步产生了新图片时，才追加到历史中
+        for i, img in enumerate(next_image_obs):
+            if img is not None:
+                self.image_history[i].append(img)
 
         # 4) Build Next Observation
         next_observations = {
             "text": self.build_text_obs(init=False),
-            "image": next_image_obs,
+            # ✅ 始终传递累积的图片列表
+            "image": self.image_history,
             "anchor": next_text_obs.copy(),
         }
 

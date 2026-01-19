@@ -36,7 +36,7 @@ class GraphSearchEnv:
         self.step_count = 0
         self.seen_nodes = set()
         self.done = False
-        self.current_image = None
+        self.current_image = None # 仅用于记录最近一次的图，不强制每步都发
         self.episode_color_seed = random.randint(0, 1000000)
 
     def _format_legend(self, legend_dict: Dict[str, str]) -> str:
@@ -46,8 +46,8 @@ class GraphSearchEnv:
 
     def reset(self, kwargs: Dict[str, Any]) -> str:
         """
-        重置环境并开始新的 Episode。
-        初始状态：只有中心节点，无周围节点图像。
+        重置环境。
+        初始状态：生成并返回中心节点图像。
         """
         self._reset_internal()
 
@@ -58,17 +58,17 @@ class GraphSearchEnv:
         )
         self.answer = kwargs["answer"]
         
-        # 1. 获取中心节点的统计信息
+        # 1. 统计信息
         stats = self.visualizer.get_node_degree_info(self.center_id)
         
-        # 2. 获取候选类别列表 (Top 100 near/sim nodes)
+        # 2. 候选类别
         candidates = self.visualizer.get_candidate_classes(self.center_id, top_k=100)
         candidates_str = ", ".join(candidates)
         
-        # 3. 绘制初始视图 (Center Only) -> 满足“初始只有一个点”
+        # 3. 初始绘图 (必须有图)
         img_bytes, legend_dict = self.visualizer.draw_subgraph(
             self.center_id, 
-            view_mode="center",  # 仅画中心
+            view_mode="center",
             max_nodes=1,
             color_seed=self.episode_color_seed 
         )
@@ -79,18 +79,17 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         
-        # 更新 current_image
+        # 生成初始图片
         self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
         
-        # 构建初始文本观察
-        # ✅ 必须包含 <image> 标签，因为我们返回了 self.current_image
+        # ✅ Reset 必须包含 <image>
         obs = (
             f"Current Agent Task: Classify Node {self.center_id}.\n"
             f"Center Node Info:\n"
             f"- Text: {self.center_text}\n"
             f"- In-Degree: {stats['in_degree']}, Out-Degree: {stats['out_degree']}\n"
             f"- 1-Hop Neighbors: {stats['neighbor_count_1hop']}\n\n"
-            f"Candidate Categories (from surrounding context): {candidates_str}\n\n"
+            f"Candidate Categories: {candidates_str}\n\n"
             f"Current View: Center Node Only. Use 'check_graph' to see neighbors.\n"
             f"<image>" 
         )
@@ -99,19 +98,21 @@ class GraphSearchEnv:
 
     def step(self, action: str):
         if self.done:
-            return "", 0, True, {}
+            return "", None, True, {}
 
         self.step_count += 1
         reward = 0
         done = False
         obs = ""
         
+        # 本步生成的图片，默认为 None (表示本步不产生新图)
+        step_image = None
+        
         # --- 动作处理逻辑 ---
         
-        # 动作 A: check_graph (调整图视图)
+        # 动作 A: check_graph (需要生成新图)
         if action.startswith("check_graph:"):
             try:
-                # 预期格式: check_graph:view_mode,max_nodes
                 params = action.split(":", 1)[1].strip().split(",")
                 view_mode = params[0].strip()
                 max_nodes = int(params[1].strip())
@@ -123,17 +124,19 @@ class GraphSearchEnv:
                     color_seed=self.episode_color_seed 
                 )
                 
-                # 更新 current_image 为新视图
+                # 更新 self.current_image 并赋值给 step_image
                 self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+                step_image = self.current_image
+                
                 legend_str = self._format_legend(legend_dict)
                 
-                obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}"
+                # ✅ 只有 check_graph 成功时，文本才追加 <image>
+                obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}\n<image>"
             except Exception as e:
                 obs = f"Error in check_graph: {str(e)}. Use format: check_graph:view_mode,max_nodes"
 
-        # 动作 B: check_node / check_nodes (查阅节点文本)
+        # 动作 B: check_node (纯文本，不生成图)
         elif action.startswith("check_node:") or action.startswith("check_nodes:"):
-            # 保持 self.current_image 不变 (即 "永远将最近一步生成的图像放到下一步")
             node_ids = []
             try:
                 content_str = action.split(":", 1)[1].strip()
@@ -152,10 +155,11 @@ class GraphSearchEnv:
                     text = self.node_text_db.get(str(node_id), "No text available.")
                     texts.append(f"Node {node_id} Text:\n{text}")
                 obs = "\n\n".join(texts)
+                # ❌ 这里没有 <image> 标签，step_image 保持为 None
             else:
                 obs = "Invalid node ID format."
 
-        # 动作 C: final (提交答案)
+        # 动作 C: final
         elif action.startswith("final:"):
             pred = action.split(":", 1)[1].strip()
             obs = "Final answer submitted."
@@ -166,7 +170,6 @@ class GraphSearchEnv:
         else:
             obs = "Invalid action."
 
-        # 超时检查
         if not done and self.step_count >= self.max_steps:
             done = True
             self.done = True
@@ -177,12 +180,8 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
 
-        # ✅ 关键修正：无论什么动作，都追加 <image> 标签，
-        # 因为 BatchGraphSearchEnv.step 始终会发送 self.current_image。
-        # 这样文本中的 <image> 数量就和传入的图像数量一致了。
-        obs += "\n<image>"
-
-        return obs, reward, done, info
+        # 返回 obs (可能含 <image> 也可能不含), step_image (可能是 Image 也可能是 None)
+        return obs, step_image, reward, done, info
 
 
 def build_graph_search_envs(
@@ -230,17 +229,23 @@ def build_graph_search_envs(
             for env, kw in zip(envs, kwargs):
                 obs, img, info = env.reset(kw)
                 text_obs.append(obs)
-                image_obs.append(img)
+                # Reset 必然有图，使用 copy() 确保独立对象
+                image_obs.append(img.copy())
                 infos.append(info)
             return text_obs, image_obs, infos
 
         def step(self, actions: List[str]):
             text_obs, image_obs, rewards, dones, infos = [], [], [], [], []
             for env, act in zip(envs, actions):
-                obs, r, d, info = env.step(act)
+                obs, img, r, d, info = env.step(act) # img 可能是 None
+                
                 text_obs.append(obs)
-                # ✅ 始终传递当前的图像 (current_image)
-                image_obs.append(env.current_image)
+                
+                if img is not None:
+                    image_obs.append(img.copy()) # 返回新图的副本
+                else:
+                    image_obs.append(None)       # 本步无图
+                
                 rewards.append(r)
                 dones.append(d)
                 infos.append(info)
