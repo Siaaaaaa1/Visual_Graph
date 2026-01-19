@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Tuple
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SearchMemory
 
+# ... (Prompt 模板保持不变，省略以节省空间，只展示 Class 实现) ...
 # =========================
 # 1. 固定任务指令 (Task Instruction)
 # =========================
@@ -105,7 +106,6 @@ Example:
 <action>check_nodes:[1234, 5678]</action>
 """
 
-
 # =========================
 # 3. GraphSearchEnvironmentManager
 # =========================
@@ -121,50 +121,38 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         super().__init__(envs, projection_f, config)
 
     def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
-        # text_obs: [str], image_obs: [np.array]
         text_obs, image_obs, infos = self.envs.reset(kwargs=kwargs)
 
         self.initial_states = text_obs
         self.memory.reset(batch_size=len(text_obs))
 
-        # Reset 时只有一步，Tag和Image一一对应，无需处理
         observations = {
             "text": self.build_text_obs(init=True),
-            "image": image_obs, # 直接返回单张图片列表
+            "image": image_obs, # List[np.array] (1024x1024)
             "anchor": text_obs.copy(),
         }
 
         return observations, infos
 
     def step(self, text_actions: List[str]):
-        # 1) Projection
         actions, valids = self.projection_f(text_actions)
 
-        # 2) Environment Step
-        # next_image_obs 里的元素可能是 Image (如果 check_graph) 或 None (如果 check_node)
+        # next_image_obs: 现在的 list 里面全是 np.array (1024x1024)，没有 None
         next_text_obs, next_image_obs, rewards, dones, infos = self.envs.step(actions)
 
-        # --- 关键修改：清理历史中的 <image> 标签 ---
-        # 现在的 Prompt 结构是: [Initial] + [History Step 1] + ... + [Current Step]
-        # VLM 只能看到 Current Step 对应的图片。
-        # 因此，我们需要把 [Initial] 和 [History] 中的 <image> 标签全部去掉。
-        
+        # --- 清理历史中的 <image> 标签 ---
         for i in range(len(next_text_obs)):
-            # 1. 清理 Initial State 中的标签 (只做一次即可，重复做也无妨)
+            # 1. 清理 Initial State
             if "<image>" in self.initial_states[i]:
                 self.initial_states[i] = self.initial_states[i].replace("<image>", "")
             
-            # 2. 清理 Memory 中上一轮的标签
-            # 访问 SearchMemory 的私有 _data 属性来原地修改历史记录
-            # self.memory._data[i] 是一个列表，包含该环境的所有历史步骤
+            # 2. 清理 Memory (上一轮)
             if len(self.memory._data[i]) > 0:
                 last_step = self.memory._data[i][-1]
-                # 检查 observation 字段 (对应 "information" key)
                 if "information" in last_step and "<image>" in last_step["information"]:
-                    # 将旧的 <image> 替换为文本提示，表明这里曾经有图
                     last_step["information"] = last_step["information"].replace("<image>", "")
 
-        # 3) Memory Store (存储当前最新的 Observation，保留 <image> 标签)
+        # 3) Memory Store (存储含有 <image> 的新 Obs)
         self.memory.store({
             "search": actions,
             "information": next_text_obs,
@@ -173,7 +161,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         # 4) Build Next Observation
         next_observations = {
             "text": self.build_text_obs(init=False),
-            # 传递当前步的单张图片 (或 None)，不再是列表
+            # 这里传回去的是 List[np.array]，且形状一致
             "image": next_image_obs, 
             "anchor": next_text_obs.copy(),
         }

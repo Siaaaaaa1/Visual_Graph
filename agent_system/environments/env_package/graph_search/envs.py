@@ -65,7 +65,7 @@ class GraphSearchEnv:
         candidates = self.visualizer.get_candidate_classes(self.center_id, top_k=100)
         candidates_str = ", ".join(candidates)
         
-        # 3. 初始绘图 (必须有图)
+        # 3. 初始绘图
         img_bytes, legend_dict = self.visualizer.draw_subgraph(
             self.center_id, 
             view_mode="center",
@@ -79,7 +79,7 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         
-        # ✅ 关键修改：强制 Resize 到固定分辨率 (1024x1024)，确保 Batch 训练时 Tensor 形状一致
+        # 强制 Resize 固定分辨率
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
         self.current_image = np.array(pil_img)
@@ -100,15 +100,13 @@ class GraphSearchEnv:
 
     def step(self, action: str):
         if self.done:
+            # Done 时返回 None 没关系，因为通常会被 Mask 掉，或者这一步不再进 Model
             return "", None, True, {}
 
         self.step_count += 1
         reward = 0
         done = False
         obs = ""
-        
-        # 本步生成的图片，默认为 None
-        step_image = None
         
         # --- 动作处理逻辑 ---
         
@@ -125,19 +123,18 @@ class GraphSearchEnv:
                     color_seed=self.episode_color_seed 
                 )
                 
-                # ✅ 关键修改：强制 Resize 到固定分辨率
+                # 更新 current_image (Resize)
                 pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
-                
                 self.current_image = np.array(pil_img)
-                step_image = self.current_image
                 
                 legend_str = self._format_legend(legend_dict)
-                obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}\n<image>"
+                obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}"
             except Exception as e:
                 obs = f"Error in check_graph: {str(e)}. Use format: check_graph:view_mode,max_nodes"
 
         elif action.startswith("check_node:") or action.startswith("check_nodes:"):
+            # 不更新图像，仅查文本
             node_ids = []
             try:
                 content_str = action.split(":", 1)[1].strip()
@@ -178,6 +175,13 @@ class GraphSearchEnv:
             "seen_nodes": list(self.seen_nodes),
             "won": bool(reward)
         }
+        
+        # ✅ 关键修改 1：始终在 obs 末尾追加 <image>
+        obs += "\n<image>"
+
+        # ✅ 关键修改 2：始终返回 current_image 的副本 (不能是 None)
+        # 这样 Batch 中的每个样本都有图，且分辨率一致，满足 stack 要求
+        step_image = self.current_image.copy()
 
         return obs, step_image, reward, done, info
 
@@ -197,16 +201,13 @@ def build_graph_search_envs(
     dataset_name = getattr(env_config, "dataset_name", "cora")
     dataset_dir = getattr(env_config, "dataset_dir", "./datasets")
 
-    # 1. 加载文本数据库
     with open(env_config.node_text_path, "r", encoding="utf-8") as f:
         node_text_db = json.load(f)
 
-    # 2. 全局预加载图结构数据
     print(f"[build_envs] Pre-loading graph data for {dataset_name}...")
     shared_graph_data = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)
     print(f"[build_envs] Load complete.")
 
-    # 3. 实例化多个环境
     envs = [
         GraphSearchEnv(
             max_steps=max_steps, 
@@ -227,7 +228,6 @@ def build_graph_search_envs(
             for env, kw in zip(envs, kwargs):
                 obs, img, info = env.reset(kw)
                 text_obs.append(obs)
-                # Reset 必然有图，使用 copy() 确保独立对象
                 image_obs.append(img.copy())
                 infos.append(info)
             return text_obs, image_obs, infos
@@ -235,14 +235,16 @@ def build_graph_search_envs(
         def step(self, actions: List[str]):
             text_obs, image_obs, rewards, dones, infos = [], [], [], [], []
             for env, act in zip(envs, actions):
-                obs, img, r, d, info = env.step(act) # img 可能是 None
+                obs, img, r, d, info = env.step(act)
                 
                 text_obs.append(obs)
                 
+                # ✅ 始终返回 img (现在它永远不是 None)
                 if img is not None:
-                    image_obs.append(img.copy()) # 返回新图的副本
+                    image_obs.append(img.copy()) 
                 else:
-                    image_obs.append(None)       # 本步无图
+                    # 理论上不会走到这里，除非 done
+                    image_obs.append(None)
                 
                 rewards.append(r)
                 dones.append(d)
