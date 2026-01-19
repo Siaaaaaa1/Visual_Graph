@@ -79,10 +79,12 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         
-        # 生成初始图片
-        self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+        # ✅ 关键修改：强制 Resize 到固定分辨率 (1024x1024)，确保 Batch 训练时 Tensor 形状一致
+        pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
+        self.current_image = np.array(pil_img)
         
-        # ✅ Reset 必须包含 <image>
+        # Reset 必须包含 <image>
         obs = (
             f"Current Agent Task: Classify Node {self.center_id}.\n"
             f"Center Node Info:\n"
@@ -105,12 +107,11 @@ class GraphSearchEnv:
         done = False
         obs = ""
         
-        # 本步生成的图片，默认为 None (表示本步不产生新图)
+        # 本步生成的图片，默认为 None
         step_image = None
         
         # --- 动作处理逻辑 ---
         
-        # 动作 A: check_graph (需要生成新图)
         if action.startswith("check_graph:"):
             try:
                 params = action.split(":", 1)[1].strip().split(",")
@@ -124,18 +125,18 @@ class GraphSearchEnv:
                     color_seed=self.episode_color_seed 
                 )
                 
-                # 更新 self.current_image 并赋值给 step_image
-                self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB"))
+                # ✅ 关键修改：强制 Resize 到固定分辨率
+                pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+                pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
+                
+                self.current_image = np.array(pil_img)
                 step_image = self.current_image
                 
                 legend_str = self._format_legend(legend_dict)
-                
-                # ✅ 只有 check_graph 成功时，文本才追加 <image>
                 obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}\n<image>"
             except Exception as e:
                 obs = f"Error in check_graph: {str(e)}. Use format: check_graph:view_mode,max_nodes"
 
-        # 动作 B: check_node (纯文本，不生成图)
         elif action.startswith("check_node:") or action.startswith("check_nodes:"):
             node_ids = []
             try:
@@ -155,11 +156,9 @@ class GraphSearchEnv:
                     text = self.node_text_db.get(str(node_id), "No text available.")
                     texts.append(f"Node {node_id} Text:\n{text}")
                 obs = "\n\n".join(texts)
-                # ❌ 这里没有 <image> 标签，step_image 保持为 None
             else:
                 obs = "Invalid node ID format."
 
-        # 动作 C: final
         elif action.startswith("final:"):
             pred = action.split(":", 1)[1].strip()
             obs = "Final answer submitted."
@@ -180,7 +179,6 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
 
-        # 返回 obs (可能含 <image> 也可能不含), step_image (可能是 Image 对象也可能是 None)
         return obs, step_image, reward, done, info
 
 
@@ -229,7 +227,7 @@ def build_graph_search_envs(
             for env, kw in zip(envs, kwargs):
                 obs, img, info = env.reset(kw)
                 text_obs.append(obs)
-                # Reset 必然有图，使用 copy() 确保独立对象 (虽然此时 img 是新生成的)
+                # Reset 必然有图，使用 copy() 确保独立对象
                 image_obs.append(img.copy())
                 infos.append(info)
             return text_obs, image_obs, infos
