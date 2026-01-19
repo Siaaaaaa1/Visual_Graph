@@ -11,26 +11,28 @@ GRAPH_SEARCH_TASK_INSTRUCTION = """You are a graph reasoning agent.
 
 You will be given:
 - a CENTER node (ID + text),
-- a rendered subgraph image (<image>),
-- a legend and color distribution describing neighbor categories.
+- statistical info about the center node (degrees, etc.),
+- a list of CANDIDATE CLASSES (from surrounding nodes).
+
+**Important:** Initially, you do NOT have a view of the graph neighbors. You see only the center node. You must actively query the graph view to see neighbors.
 
 Your goal:
 Predict the category of the CENTER node.
 
-You have the following tools to gather information:
+You have 3 options to gather information and solve the task:
 
 1. **Check Node Text**: Inspect the text content of specific nodes.
-2. **Check Graph View**: Update the visual graph to focus on different aspects.
-   - Hop Mode:
-       * '1-hop': only immediate neighbors
-       * '2-hop': include both 1-hop and 2-hop neighbors
-   - Rank Mode:
-       * 'hop': prioritize closer hops (1-hop before 2-hop)
-       * 'sim': prioritize nodes by semantic similarity to the center node
-   - Max Nodes: Integer limit for the number of nodes to draw (e.g., 10, 20).
+2. **Check Graph View**: Render a subgraph view centered on the target node. You can specify the 'View Mode' and 'Max Nodes'.
+   - **View Modes**:
+       * `1-hop`: Show only immediate neighbors. (Truncates by similarity if exceeding max).
+       * `2-hop`: Show 1-hop and 2-hop neighbors. (Truncates by similarity).
+       * `sim`: Show nodes with highest semantic similarity to center, regardless of hop distance.
+       * `1-hop+sim`: Priority to 1-hop neighbors. If count < max, fill with high-similarity nodes.
+       * `2-hop+sim`: Priority to 1-hop and 2-hop. If count < max, fill with high-similarity nodes.
+   - **Max Nodes**: Integer limit (e.g., 10, 20).
+3. **Submit Answer**: Submit the final category prediction.
 
-When submitting the final answer, use the EXACT category name shown in the legend (case-insensitive).
-Do NOT paraphrase or modify the category name.
+When submitting the final answer, use the EXACT category name from the provided list or legend (case-insensitive).
 
 Follow the interaction rules strictly.
 """
@@ -49,24 +51,23 @@ You may choose EXACTLY ONE action from the following list:
 
 1. Inspect Node Text:
    <action>check_node:<node_id></action>
-   <action>check_nodes:[<node_id_1>,<node_id_2>,...,<node_id_k>]</action>  (k ≤ 5)
+   <action>check_nodes:[<node_id_1>,<node_id_2>,...]</action>
 
 2. Update Graph Visualization:
-   <action>check_graph:<hop_mode>,<rank_mode>,<max_nodes></action>
-   Example: <action>check_graph:2-hop,sim,20</action>
-   (Valid hop_mode: 1-hop, 2-hop; Valid rank_mode: hop, sim)
+   <action>check_graph:<view_mode>,<max_nodes></action>
+   Example: <action>check_graph:1-hop+sim,15</action>
+   (Valid modes: 1-hop, 2-hop, sim, 1-hop+sim, 2-hop+sim)
 
 3. Submit Answer:
    <action>final:<category_name></action>
-   (Use the EXACT category name from the legend.)
 
 Response Format:
-1. First, analyze the image and text to decide your next step. Wrap your reasoning inside <think>...</think> tags.
+1. First, analyze the current information (text or graph) to decide your next step. Wrap your reasoning inside <think>...</think> tags.
 2. Then, on a new line, output the chosen action wrapped in <action>...</action> tags.
 
 Example:
-<think>The center node is connected to several blue nodes, but I need to verify their text content to be sure about the category.</think>
-<action>check_nodes:[12, 45]</action>
+<think>I see the center node text is about ML. I need to see its direct neighbors to infer the class.</think>
+<action>check_graph:1-hop,10</action>
 """
 
 
@@ -84,24 +85,23 @@ You may choose EXACTLY ONE action from the following list:
 
 1. Inspect Node Text:
    <action>check_node:<node_id></action>
-   <action>check_nodes:[<node_id_1>,<node_id_2>,...,<node_id_k>]</action>  (k ≤ 5)
+   <action>check_nodes:[<node_id_1>,<node_id_2>,...]</action>
 
 2. Update Graph Visualization:
-   <action>check_graph:<hop_mode>,<rank_mode>,<max_nodes></action>
-   Example: <action>check_graph:2-hop,sim,20</action>
-   (Valid hop_mode: 1-hop, 2-hop; Valid rank_mode: hop, sim)
+   <action>check_graph:<view_mode>,<max_nodes></action>
+   Example: <action>check_graph:1-hop,20</action>
+   (Valid modes: 1-hop, 2-hop, sim, 1-hop+sim, 2-hop+sim)
 
 3. Submit Answer:
    <action>final:<category_name></action>
-   (Use the EXACT category name from the legend.)
 
 Response Format:
 1. First, review the history and analyze the current state. Wrap your reasoning inside <think>...</think> tags.
 2. Then, on a new line, output the chosen action wrapped in <action>...</action> tags.
 
 Example:
-<think>I have already checked the text of node 12 in the previous step. Now I need to see a broader view of the graph structure.</think>
-<action>check_graph:2-hop,sim,20</action>
+<think>The 1-hop neighbors are mixed. I want to see if there are any high-similarity nodes further away.</think>
+<action>check_graph:sim,10</action>
 """
 
 
@@ -127,7 +127,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
 
         observations = {
             "text": self.build_text_obs(init=True),
-            "image": image_obs,  # 直接透传 bytes 给 VLM Processor
+            "image": image_obs,
             "anchor": text_obs.copy(),
         }
 

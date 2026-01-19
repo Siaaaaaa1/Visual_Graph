@@ -11,9 +11,11 @@ _ACTION_TAG = re.compile(r"<action>", re.IGNORECASE)
 _CHECK_NODE_RE = re.compile(r"^check_node:(\d+)$")
 _CHECK_NODES_RE = re.compile(r"^check_nodes:\[(.*?)\]$")
 
+# 允许 view_mode 包含字母、数字、连字符和加号 (例如: 1-hop+sim)
 _CHECK_GRAPH_RE = re.compile(r"^check_graph:(.+?)$") 
 
 MAX_NODES_PER_STEP = 5
+VALID_VIEW_MODES = {"1-hop", "2-hop", "sim", "1-hop+sim", "2-hop+sim"}
 
 def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
     results: List[str] = []
@@ -59,22 +61,19 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
             valids[i] = 0
             continue
 
-        # 4. check_graph:<hop_mode>,<rank_mode>,<max_nodes>
+        # 4. check_graph:<view_mode>,<max_nodes>
         if action.startswith("check_graph:"):
             try:
                 params = action.split(":", 1)[1].split(",")
 
-                # 必须正好 3 个参数
-                if len(params) != 3:
+                # 必须正好 2 个参数
+                if len(params) != 2:
                     raise ValueError
 
-                hop_mode = params[0].strip()     # "1-hop" | "2-hop"
-                rank_mode = params[1].strip()    # "hop" | "sim"
-                max_nodes = int(params[2].strip())
+                view_mode = params[0].strip()
+                max_nodes = int(params[1].strip())
 
-                if hop_mode not in ["1-hop", "2-hop"]:
-                    raise ValueError
-                if rank_mode not in ["hop", "sim"]:
+                if view_mode not in VALID_VIEW_MODES:
                     raise ValueError
                 if max_nodes <= 0:
                     raise ValueError
@@ -85,7 +84,6 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
                 results.append("")
                 valids[i] = 0
                 continue
-
 
         # 5. final:<category>
         if action.startswith("final:"):
