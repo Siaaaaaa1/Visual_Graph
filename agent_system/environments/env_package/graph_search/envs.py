@@ -100,8 +100,14 @@ class GraphSearchEnv:
 
     def step(self, action: str):
         if self.done:
-            # Done 时返回 None 没关系，因为通常会被 Mask 掉，或者这一步不再进 Model
-            return "", None, True, {}
+            # ✅ 修复 1: 返回 5 个值 (obs, img, reward, done, info)
+            # ✅ 修复 2: 即使 Done 也要返回有效图像，防止 Batch Collate 报错
+            if self.current_image is not None:
+                img_ret = self.current_image.copy()
+            else:
+                img_ret = np.zeros((1024, 1024, 3), dtype=np.uint8)
+            
+            return "", img_ret, 0, True, {}
 
         self.step_count += 1
         reward = 0
@@ -176,11 +182,10 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
         
-        # ✅ 关键修改 1：始终在 obs 末尾追加 <image>
+        # 始终在 obs 末尾追加 <image>
         obs += "\n<image>"
 
-        # ✅ 关键修改 2：始终返回 current_image 的副本 (不能是 None)
-        # 这样 Batch 中的每个样本都有图，且分辨率一致，满足 stack 要求
+        # 始终返回 current_image 的副本 (不能是 None)
         step_image = self.current_image.copy()
 
         return obs, step_image, reward, done, info
@@ -235,15 +240,15 @@ def build_graph_search_envs(
         def step(self, actions: List[str]):
             text_obs, image_obs, rewards, dones, infos = [], [], [], [], []
             for env, act in zip(envs, actions):
+                # 这里解包 5 个值，与 GraphSearchEnv.step 对应
                 obs, img, r, d, info = env.step(act)
                 
                 text_obs.append(obs)
                 
-                # ✅ 始终返回 img (现在它永远不是 None)
+                # img 现在永远是 np.array，不为 None
                 if img is not None:
                     image_obs.append(img.copy()) 
                 else:
-                    # 理论上不会走到这里，除非 done
                     image_obs.append(None)
                 
                 rewards.append(r)
