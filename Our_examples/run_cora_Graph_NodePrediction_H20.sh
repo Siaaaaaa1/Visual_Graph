@@ -1,7 +1,5 @@
 set -x
 # --- 1. 显存碎片优化 (保持开启) ---
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=FLASHINFER
 export WANDB_API_KEY="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"
