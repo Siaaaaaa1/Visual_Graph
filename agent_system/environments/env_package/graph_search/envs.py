@@ -17,9 +17,6 @@ class GraphSearchEnv:
                  dataset_name: str, 
                  dataset_dir: str,
                  shared_graph_data: Optional[Tuple[Dict, Dict]] = None):
-        """
-        初始化图搜索环境。
-        """
         self.max_steps = max_steps
         self.node_text_db = node_text_db
         
@@ -32,7 +29,6 @@ class GraphSearchEnv:
         self._reset_internal()
 
     def _reset_internal(self):
-        """重置内部状态变量。"""
         self.step_count = 0
         self.seen_nodes = set()
         self.done = False
@@ -45,10 +41,6 @@ class GraphSearchEnv:
         return "; ".join(items)
 
     def reset(self, kwargs: Dict[str, Any]) -> str:
-        """
-        重置环境。
-        初始状态：生成并返回中心节点图像。
-        """
         self._reset_internal()
 
         self.center_id = kwargs["center_id"]
@@ -79,12 +71,12 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         
-        # 强制 Resize 固定分辨率
+        # 强制 Resize 固定分辨率 (1024x1024)
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
         self.current_image = np.array(pil_img)
         
-        # Reset 必须包含 <image>
+        # Reset 包含 <image>
         obs = (
             f"Current Agent Task: Classify Node {self.center_id}.\n"
             f"Center Node Info:\n"
@@ -100,13 +92,12 @@ class GraphSearchEnv:
 
     def step(self, action: str):
         if self.done:
-            # ✅ 修复 1: 返回 5 个值 (obs, img, reward, done, info)
-            # ✅ 修复 2: 即使 Done 也要返回有效图像，防止 Batch Collate 报错
+            # Done 时也必须返回有效图像，防止 Batch Collate 报错
             if self.current_image is not None:
                 img_ret = self.current_image.copy()
             else:
                 img_ret = np.zeros((1024, 1024, 3), dtype=np.uint8)
-            
+            # 返回 5 个值
             return "", img_ret, 0, True, {}
 
         self.step_count += 1
@@ -129,18 +120,18 @@ class GraphSearchEnv:
                     color_seed=self.episode_color_seed 
                 )
                 
-                # 更新 current_image (Resize)
                 pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
                 pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
                 self.current_image = np.array(pil_img)
                 
                 legend_str = self._format_legend(legend_dict)
+                # ✅ 修正：这里不再添加 <image>，只生成文本描述
                 obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}"
             except Exception as e:
                 obs = f"Error in check_graph: {str(e)}. Use format: check_graph:view_mode,max_nodes"
 
         elif action.startswith("check_node:") or action.startswith("check_nodes:"):
-            # 不更新图像，仅查文本
+            # 不更新图像
             node_ids = []
             try:
                 content_str = action.split(":", 1)[1].strip()
@@ -182,10 +173,10 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
         
-        # 始终在 obs 末尾追加 <image>
+        # ✅ 统一在末尾添加唯一的 <image> 标签
         obs += "\n<image>"
 
-        # 始终返回 current_image 的副本 (不能是 None)
+        # ✅ 始终返回图像副本
         step_image = self.current_image.copy()
 
         return obs, step_image, reward, done, info
@@ -198,9 +189,6 @@ def build_graph_search_envs(
     is_train: bool,
     env_config
 ):
-    """
-    构建批量图搜索环境。
-    """
     batch_size = env_num * group_n
     max_steps = env_config.max_steps
     dataset_name = getattr(env_config, "dataset_name", "cora")
@@ -240,15 +228,14 @@ def build_graph_search_envs(
         def step(self, actions: List[str]):
             text_obs, image_obs, rewards, dones, infos = [], [], [], [], []
             for env, act in zip(envs, actions):
-                # 这里解包 5 个值，与 GraphSearchEnv.step 对应
                 obs, img, r, d, info = env.step(act)
                 
                 text_obs.append(obs)
-                
-                # img 现在永远是 np.array，不为 None
+                # img 始终不为 None
                 if img is not None:
                     image_obs.append(img.copy()) 
                 else:
+                    # 保底，理论上不会触发
                     image_obs.append(None)
                 
                 rewards.append(r)
