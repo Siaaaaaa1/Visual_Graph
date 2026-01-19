@@ -3,7 +3,6 @@ from typing import Any, Dict, List, Tuple
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import SearchMemory
 
-# ... (Prompt 模板保持不变，省略以节省空间，只展示 Class 实现) ...
 # =========================
 # 1. 固定任务指令 (Task Instruction)
 # =========================
@@ -14,6 +13,7 @@ You will be given:
 - a CENTER node (ID + text),
 - statistical info about the center node (degrees, etc.),
 - a list of CANDIDATE CLASSES (from surrounding nodes).
+- a image of graph <image>
 
 **Important:** Initially, you do NOT have a view of the graph neighbors. You see only the center node. You must actively query the graph view to see neighbors.
 
@@ -107,13 +107,13 @@ Example:
 """
 
 # =========================
-# 3. GraphSearchEnvironmentManager
+# 3. Manager
 # =========================
 
 class GraphSearchEnvironmentManager(EnvironmentManagerBase):
     """
     EnvironmentManager for GraphSearch.
-    Handles dynamic cleaning of <image> tags in history to ensure alignment with single-image inputs.
+    Assumes <image> tag is static in the Task Instruction.
     """
 
     def __init__(self, envs, projection_f, config):
@@ -128,7 +128,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
 
         observations = {
             "text": self.build_text_obs(init=True),
-            "image": image_obs, # List[np.array] (1024x1024)
+            "image": image_obs, # List[np.array], aligned with batch
             "anchor": text_obs.copy(),
         }
 
@@ -137,31 +137,17 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
     def step(self, text_actions: List[str]):
         actions, valids = self.projection_f(text_actions)
 
-        # next_image_obs: 现在的 list 里面全是 np.array (1024x1024)，没有 None
+        # next_image_obs 始终包含有效的 np.array
         next_text_obs, next_image_obs, rewards, dones, infos = self.envs.step(actions)
 
-        # --- 清理历史中的 <image> 标签 ---
-        for i in range(len(next_text_obs)):
-            # 1. 清理 Initial State
-            if "<image>" in self.initial_states[i]:
-                self.initial_states[i] = self.initial_states[i].replace("<image>", "")
-            
-            # 2. 清理 Memory (上一轮)
-            if len(self.memory._data[i]) > 0:
-                last_step = self.memory._data[i][-1]
-                if "information" in last_step and "<image>" in last_step["information"]:
-                    last_step["information"] = last_step["information"].replace("<image>", "")
-
-        # 3) Memory Store (存储含有 <image> 的新 Obs)
+        # 存储纯文本历史 (不含 <image>，因为标签在 Instruction 里)
         self.memory.store({
             "search": actions,
             "information": next_text_obs,
         })
 
-        # 4) Build Next Observation
         next_observations = {
             "text": self.build_text_obs(init=False),
-            # 这里传回去的是 List[np.array]，且形状一致
             "image": next_image_obs, 
             "anchor": next_text_obs.copy(),
         }
@@ -185,6 +171,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             memory_ctx = [""] * batch_size
 
         for i in range(batch_size):
+            # Prompt 模板已经包含了带有 <image> 的 instruction
             if init or self.config.env.history_length <= 0:
                 prompt = GRAPH_SEARCH_TEMPLATE_NO_HIS.format(
                     task_instruction=GRAPH_SEARCH_TASK_INSTRUCTION,

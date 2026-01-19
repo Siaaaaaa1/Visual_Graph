@@ -19,8 +19,6 @@ class GraphSearchEnv:
                  shared_graph_data: Optional[Tuple[Dict, Dict]] = None):
         self.max_steps = max_steps
         self.node_text_db = node_text_db
-        
-        # 初始化可视化引擎
         self.visualizer = GraphVisualizer(
             dataset_name=dataset_name, 
             dataset_dir=dataset_dir,
@@ -50,14 +48,10 @@ class GraphSearchEnv:
         )
         self.answer = kwargs["answer"]
         
-        # 1. 统计信息
         stats = self.visualizer.get_node_degree_info(self.center_id)
-        
-        # 2. 候选类别
         candidates = self.visualizer.get_candidate_classes(self.center_id, top_k=100)
         candidates_str = ", ".join(candidates)
         
-        # 3. 初始绘图
         img_bytes, legend_dict = self.visualizer.draw_subgraph(
             self.center_id, 
             view_mode="center",
@@ -71,12 +65,12 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         
-        # 强制 Resize 固定分辨率 (1024x1024)
+        # 强制 Resize 到 1024x1024，保证 Batch 形状一致
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         pil_img = pil_img.resize((1024, 1024), Image.Resampling.LANCZOS)
         self.current_image = np.array(pil_img)
         
-        # Reset 包含 <image>
+        # ✅ Obs 纯文本，不包含 <image> (因为已经在 Task Instruction 里了)
         obs = (
             f"Current Agent Task: Classify Node {self.center_id}.\n"
             f"Center Node Info:\n"
@@ -84,28 +78,24 @@ class GraphSearchEnv:
             f"- In-Degree: {stats['in_degree']}, Out-Degree: {stats['out_degree']}\n"
             f"- 1-Hop Neighbors: {stats['neighbor_count_1hop']}\n\n"
             f"Candidate Categories: {candidates_str}\n\n"
-            f"Current View: Center Node Only. Use 'check_graph' to see neighbors.\n"
-            f"<image>" 
+            f"Current View: Center Node Only. Use 'check_graph' to see neighbors."
         )
 
         return obs, self.current_image, infos
 
     def step(self, action: str):
         if self.done:
-            # Done 时也必须返回有效图像，防止 Batch Collate 报错
+            # Done 时返回全黑图或上一张图，保证 Batch Stack 不报错
             if self.current_image is not None:
                 img_ret = self.current_image.copy()
             else:
                 img_ret = np.zeros((1024, 1024, 3), dtype=np.uint8)
-            # 返回 5 个值
             return "", img_ret, 0, True, {}
 
         self.step_count += 1
         reward = 0
         done = False
         obs = ""
-        
-        # --- 动作处理逻辑 ---
         
         if action.startswith("check_graph:"):
             try:
@@ -125,7 +115,6 @@ class GraphSearchEnv:
                 self.current_image = np.array(pil_img)
                 
                 legend_str = self._format_legend(legend_dict)
-                # ✅ 修正：这里不再添加 <image>，只生成文本描述
                 obs = f"Graph view updated (Mode: {view_mode}, Max: {max_nodes}).\nLegend: {legend_str}"
             except Exception as e:
                 obs = f"Error in check_graph: {str(e)}. Use format: check_graph:view_mode,max_nodes"
@@ -173,10 +162,9 @@ class GraphSearchEnv:
             "won": bool(reward)
         }
         
-        # ✅ 统一在末尾添加唯一的 <image> 标签
-        obs += "\n<image>"
-
-        # ✅ 始终返回图像副本
+        # ✅ Obs 纯文本，不包含 <image>
+        
+        # ✅ 始终返回有效的图像副本，确保 Batch Stack 成功
         step_image = self.current_image.copy()
 
         return obs, step_image, reward, done, info
@@ -235,8 +223,7 @@ def build_graph_search_envs(
                 if img is not None:
                     image_obs.append(img.copy()) 
                 else:
-                    # 保底，理论上不会触发
-                    image_obs.append(None)
+                    image_obs.append(None) # 理论不可达
                 
                 rewards.append(r)
                 dones.append(d)
