@@ -63,8 +63,17 @@ LOG_FILE="log_$(date +%Y%m%d_%H%M%S).log"
 echo "日志将输出到: $LOG_FILE"
 
 # --- 6. 执行训练并同时输出到控制台和文件 ---
+# 关闭 set -x，防止超长的命令回显污染日志
+set +x
 # set -o pipefail 确保如果 python 运行失败，脚本也会返回错误代码
 set -o pipefail 
+
+# 这里的管道逻辑：
+# 1. 2>&1 : 捕获标准输出和错误输出
+# 2. tee >(...) : 将输出分流。一路显示在屏幕（保留原样），一路进入 sed 处理后写入文件。
+# 3. sed -u -E : -u (无缓冲实时写入), -E (扩展正则)
+#    - s/\x1b\[[0-9;]*m//g : 去除 ANSI 颜色代码
+#    - s/\((WorkerDict|TaskRunner) pid=[0-9]*\)//g : 去除 (WorkerDict pid=123) 这种干扰信息
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
@@ -121,4 +130,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=150 \
     trainer.val_before_train=false \
     ray_init.num_cpus=64 \
-    actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee "$LOG_FILE"
+    actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee >(sed -u -E 's/\x1b\[[0-9;]*m//g; s/\((WorkerDict|TaskRunner) pid=[0-9]*\)//g' > "$LOG_FILE")
