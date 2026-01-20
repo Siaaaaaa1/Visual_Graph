@@ -33,6 +33,14 @@ NODE_TEXT_PATH="./datasets/${DETECTED_DATASET}_text.json"
 TRAIN_FILE="./datasets/${DETECTED_DATASET}_train_slim.parquet"
 VAL_FILE="./datasets/${DETECTED_DATASET}_test_slim.parquet"
 
+# --- 5. 日志文件名生成 (log_年月日_时分秒.log) ---
+LOG_FILE="log_$(date +%Y%m%d_%H%M%S).log"
+echo "日志将输出到: $LOG_FILE"
+
+# --- 6. 执行训练并同时输出到控制台和文件 ---
+# set -o pipefail 确保如果 python 运行失败，脚本也会返回错误代码
+set -o pipefail 
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$TRAIN_FILE \
@@ -88,4 +96,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=150 \
     trainer.val_before_train=false \
     ray_init.num_cpus=64 \
-    actor_rollout_ref.rollout.dtype=bfloat16
+    actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee "$LOG_FILE"
