@@ -26,7 +26,32 @@ ppo_mini_batch_size=512
 # 单卡微批次从 8 提升到 16 或 24 (4B模型在H20上完全可以更大)
 micro_batch_size=16
 
-# ... (中间的脚本信息获取与数据集检测部分保持不变) ...
+# --- 2. 脚本信息获取 ---
+SCRIPT_NAME=$(basename "$0" .sh)
+EXP_DATE=$(date +%m%d%H)
+EXPERIMENT_NAME="${SCRIPT_NAME}_${EXP_DATE}"
+
+# --- 3. 动态检测数据集 ---
+KEYWORDS=("pubmed" "cora" "arxiv")
+MATCH_COUNT=0
+DETECTED_DATASET=""
+
+for KEY in "${KEYWORDS[@]}"; do
+    if [[ "$SCRIPT_NAME" == *"$KEY"* ]]; then
+        DETECTED_DATASET="$KEY"
+        ((MATCH_COUNT++))
+    fi
+done
+
+if [ $MATCH_COUNT -eq 0 ]; then
+    echo "错误: 脚本文件名 '$SCRIPT_NAME' 中未包含指定的数据集名称 (pubmed, cora, arxiv)。"
+    exit 1
+elif [ $MATCH_COUNT -gt 1 ]; then
+    echo "错误: 脚本文件名 '$SCRIPT_NAME' 中包含多个数据集名称，请只保留一个。"
+    exit 1
+fi
+
+echo "✅ 检测到数据集: $DETECTED_DATASET"
 
 # --- 4. 路径设置 ---
 NODE_TEXT_PATH="./datasets/${DETECTED_DATASET}_text.json"
