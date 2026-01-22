@@ -129,7 +129,7 @@ actor_rollout_ref:
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     disable_log_stats: False # 开启日志以观察 Prefix Hit Rate
     do_sample: True
-    n: 8 # group_size
+    n: 1 # group_size
     block_size: 16 # 配合前缀缓存建议设为 16
     engine_kwargs:
       vllm:
