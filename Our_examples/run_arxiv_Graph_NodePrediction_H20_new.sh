@@ -76,7 +76,7 @@ python3 -m verl.trainer.main_ppo \
     data.max_prompt_length=6144 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
-    data.truncation='error' \
+    data.truncation='right' \
     data.return_raw_chat=True \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
