@@ -5,15 +5,15 @@ data:
   val_files: ~/data/rlhf/gsm8k/test.parquet
   prompt_key: prompt
   reward_fn_key: data_source
-  max_prompt_length: 512
-  max_response_length: 512
+  max_prompt_length: 8192  # 匹配 8k 场景
+  max_response_length: 2048
   train_batch_size: 1024
-  val_batch_size: null
+  val_batch_size: 256
   return_raw_input_ids: False
   return_raw_chat: False
   return_full_prompt: False
   shuffle: True
-  filter_overlong_prompts: False
+  filter_overlong_prompts: True
   filter_overlong_prompts_workers: 1
   truncation: error
   image_key: images
@@ -27,26 +27,26 @@ data:
 actor_rollout_ref:
   hybrid_engine: True
   model:
-    path: ~/models/deepseek-llm-7b-chat
+    path: ./models/Qwen3-VL-4B-Instruct
     use_shm: False
     external_lib: null
     override_config: { }
     enable_gradient_checkpointing: True
     enable_activation_offload: False
-    use_remove_padding: False
+    use_remove_padding: True
     lora_rank: 0
     lora_alpha: 16
     target_modules: all-linear
     use_liger: False
-    use_fused_kernels: False
-    trust_remote_code: False
+    use_fused_kernels: True
+    trust_remote_code: True
     model_kwargs:
-      torch_dtype: bfloat16  # 关键修复：默认使用 bf16 防止 FA2 报错
+      torch_dtype: bfloat16
   actor:
     strategy: fsdp
     ppo_mini_batch_size: 256
     ppo_micro_batch_size: null
-    ppo_micro_batch_size_per_gpu: null
+    ppo_micro_batch_size_per_gpu: 8 # H20 跑 4B，微批次 8 非常稳健
     use_dynamic_bsz: False
     ppo_max_token_len_per_gpu: 16384
     grad_clip: 1.0
@@ -59,7 +59,7 @@ actor_rollout_ref:
     use_invalid_action_penalty: True
     invalid_action_penalty_coef: 0.1
     use_kl_loss: False
-    use_torch_compile: True
+    use_torch_compile: False # 多模态模型建议先关掉，防止不兼容崩溃
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
     ppo_epochs: 1
@@ -95,7 +95,7 @@ actor_rollout_ref:
         min_num_params: 0
     use_torch_compile: ${actor_rollout_ref.actor.use_torch_compile}
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: null
+    log_prob_micro_batch_size_per_gpu: 32
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
     ulysses_sequence_parallel_size: ${actor_rollout_ref.actor.ulysses_sequence_parallel_size}
@@ -109,29 +109,32 @@ actor_rollout_ref:
     use_fire_sampling: False
     prompt_length: ${data.max_prompt_length}
     response_length: ${data.max_response_length}
-    dtype: bfloat16  # 关键修复：强制 vLLM 使用 bf16
-    gpu_memory_utilization: 0.5
+    dtype: bfloat16
+    # --- H20 针对性调整 ---
+    gpu_memory_utilization: 0.8 # 提高利用率，预留大量 KV Cache
     ignore_eos: False
-    enforce_eager: True
-    free_cache_engine: True
+    enforce_eager: False # 设为 False 开启 CUDA Graph，解决 5.9% 利用率问题
+    free_cache_engine: False # 设为 False 以保留公用前缀缓存
     load_format: dummy_dtensor
     layered_summon: False
-    tensor_model_parallel_size: 2
-    max_num_batched_tokens: 8192
-    max_model_len: null
+    tensor_model_parallel_size: 1 # 4B模型单卡跑吞吐最高，H20 显存够大无需 TP
+    enable_chunked_prefill: True # 开启分块预填充，平滑显存峰值
+    max_num_batched_tokens: 16384 # 必须 >= max_model_len
+    max_model_len: 16384
+    # -------------------
     max_num_seqs: 1024
     log_prob_micro_batch_size: null
-    log_prob_micro_batch_size_per_gpu: null
+    log_prob_micro_batch_size_per_gpu: 32
     log_prob_use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
     log_prob_max_token_len_per_gpu: ${actor_rollout_ref.actor.ppo_max_token_len_per_gpu}
-    disable_log_stats: True
-    enable_chunked_prefill: True
+    disable_log_stats: False # 开启日志以观察 Prefix Hit Rate
     do_sample: True
-    n: 1
-    block_size: 256
+    n: 8 # group_size
+    block_size: 16 # 配合前缀缓存建议设为 16
     engine_kwargs:
       vllm:
-        swap_space: null
+        enable_prefix_caching: True # 解决公用前缀加速的关键
+        swap_space: 4
       sglang:
         attention_backend: null
     val_kwargs:
@@ -157,14 +160,14 @@ critic:
     total_training_steps: -1
     weight_decay: 0.01
   model:
-    path: ~/models/deepseek-llm-7b-chat
+    path: ./models/Qwen3-VL-4B-Instruct
     use_shm: False
     tokenizer_path: ${actor_rollout_ref.model.path}
     override_config: { }
     external_lib: ${actor_rollout_ref.model.external_lib}
     enable_gradient_checkpointing: True
     enable_activation_offload: False
-    use_remove_padding: False
+    use_remove_padding: True
     trust_remote_code: ${actor_rollout_ref.model.trust_remote_code}
     fsdp_config:
       param_offload: False
@@ -179,7 +182,7 @@ critic:
     target_modules: all-linear
   ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
   ppo_micro_batch_size: null
-  ppo_micro_batch_size_per_gpu: null
+  ppo_micro_batch_size_per_gpu: 8
   forward_micro_batch_size: ${critic.ppo_micro_batch_size}
   forward_micro_batch_size_per_gpu: ${critic.ppo_micro_batch_size_per_gpu}
   use_dynamic_bsz: ${actor_rollout_ref.actor.use_dynamic_bsz}
@@ -229,7 +232,7 @@ custom_reward_function:
 algorithm:
   gamma: 1.0
   lam: 1.0
-  adv_estimator: gae
+  adv_estimator: grpo
   norm_adv_by_std_in_grpo: True
   use_kl_in_reward: False
   kl_penalty: kl
@@ -253,22 +256,22 @@ algorithm:
 
 trainer:
   balance_batch: True
-  total_epochs: 30
+  total_epochs: 150
   total_training_steps: null
   project_name: Visual_Graph
-  experiment_name: test0114
+  experiment_name: h20_qwen_optimized
   logger: [ 'console', 'wandb' ]
   log_val_generations: 0
   rollout_data_dir: null
   validation_data_dir: null
   nnodes: 1
   n_gpus_per_node: 8
-  save_freq: -1
+  save_freq: 5
   resume_mode: auto
   resume_from_path: null
-  val_before_train: True
+  val_before_train: False
   val_only: False
-  test_freq: -1
+  test_freq: 10
   critic_warmup: 0
   default_hdfs_dir: null
   del_local_ckpt_after_load: False
@@ -282,29 +285,14 @@ ray_init:
   num_cpus: null
 
 env:
-  env_name: alfworld/AlfredTWEnv
+  env_name: graph_search/GraphSearchEnv
   seed: 0
   max_steps: 50
   history_length: 3
   node_text_path: null
   dataset_name: pubmed
   resources_per_worker:
-    num_cpus: 0.1
+    num_cpus: 2.0 # 加强 CPU 分配，加速视觉/逻辑处理，避免 GPU 5.9% 利用率瓶颈
     num_gpus: 0
   rollout:
-    n: 1
-  alfworld:
-    eval_dataset: eval_in_distribution
-  search:
-    log_requests: false
-    search_url: "http://127.0.0.1:8000/retrieve"
-    topk: 3
-    timeout: 60
-  sokoban:
-    dim_room: [6, 6]
-    num_boxes: 1
-    search_depth: 30
-    mode: tiny_rgb_array
-  webshop:
-    use_small: True
-    human_goals: False
+    n: 8 # 对应 group_size

@@ -10,7 +10,7 @@ export MASTER_ADDRESS=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 export WORLD_SIZE=8
 
 ENGINE=${1:-vllm}
-# 提升 CPU 分配，加速 VL 数据预处理，减少 GPU 等待 (5.9% 瓶颈优化)
+# 提升 CPU 分配，加速视觉/图数据预处理，减少 GPU 等待 (解决 5.9% 瓶颈)
 num_cpus_per_env_worker=2.0
 
 # --- H20 激进优化参数 ---
@@ -21,7 +21,7 @@ MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
 
 # PPO 参数调整
 ppo_mini_batch_size=256
-# 优化后，8 卡 H20 跑 4B 模型，micro_batch_size=8 应该非常稳定
+# 8 卡 H20 跑 4B 模型，micro_batch_size=8 非常稳健
 micro_batch_size=8
 
 # --- 2. 脚本信息获取 ---
@@ -64,6 +64,9 @@ echo "日志将输出到: $LOG_FILE"
 set +x
 set -o pipefail 
 
+# 注意：为了修复 ValueError，必须确保 max_num_batched_tokens >= max_model_len
+# 为了利用公用前缀，必须开启 enable_prefix_caching 并保持 free_cache_engine=False
+
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
     data.train_files=$TRAIN_FILE \
@@ -90,10 +93,12 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.max_model_len=16384 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=16384 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.8 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
+    actor_rollout_ref.rollout.engine_kwargs.vllm.enable_prefix_caching=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=32 \
