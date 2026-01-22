@@ -133,7 +133,6 @@ actor_rollout_ref:
     block_size: 16 # 配合前缀缓存建议设为 16
     engine_kwargs:
       vllm:
-        enable_prefix_caching: True # 解决公用前缀加速的关键
         swap_space: 4
       sglang:
         attention_backend: null
