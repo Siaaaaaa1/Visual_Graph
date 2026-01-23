@@ -12,8 +12,6 @@ export WORLD_SIZE=8
 ENGINE=${1:-vllm}
 num_cpus_per_env_worker=0.5
 
-# --- H20 激进优化参数 ---
-# 增加每轮采集的 Prompt 数量 (64 -> 256)，让8张卡有肉吃
 train_data_size=64
 val_data_size=256
 group_size=8
@@ -22,9 +20,9 @@ MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
 # PPO 参数调整
 # 全局 Batch = 256 * 8 = 2048 个样本
 # Mini Batch 设为 512，则每次 Update 包含 2048/512 = 4 个 Mini Batches
-ppo_mini_batch_size=256
-# 单卡微批次从 8 提升到 16 或 24 (4B模型在H20上完全可以更大)
-micro_batch_size=8
+ppo_mini_batch_size=128
+
+micro_batch_size=2
 
 # --- 2. 脚本信息获取 ---
 SCRIPT_NAME=$(basename "$0" .sh)
@@ -81,10 +79,10 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$VAL_FILE \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
-    data.max_prompt_length=6144 \
+    data.max_prompt_length=8192 \
     data.max_response_length=2048 \
     data.filter_overlong_prompts=True \
-    data.truncation='error' \
+    data.truncation='right' \
     data.return_raw_chat=True \
     actor_rollout_ref.model.path=$MODEL_PATH \
     actor_rollout_ref.actor.optim.lr=1e-6 \
@@ -101,7 +99,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.max_model_len=16384 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.enable_chunked_prefill=False \
     actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=False \

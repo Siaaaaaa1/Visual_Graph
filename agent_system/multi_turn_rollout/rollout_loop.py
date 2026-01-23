@@ -16,6 +16,7 @@
 import torch
 import numpy as np
 from verl import DataProto
+import time
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
 import verl.utils.torch_functional as verl_F
@@ -351,9 +352,14 @@ class TrajectoryCollector:
 
             # pad to be divisible by dp_size
             batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
+            
+            # --- 新增计时：模型交互开始 ---
+            model_start_time = time.time()
             batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
             # # unpad
             batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
+            model_duration = time.time() - model_start_time
+            # --- 新增计时：模型交互结束 ---
 
             batch.non_tensor_batch['uid'] = uid_batch
             batch.non_tensor_batch['traj_uid'] = traj_uid
@@ -362,8 +368,18 @@ class TrajectoryCollector:
             
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             
+            # --- 新增计时：环境交互开始 ---
+            env_start_time = time.time()
             next_obs, rewards, dones, infos = envs.step(text_actions)
+            env_duration = time.time() - env_start_time
+            # --- 新增计时：环境交互结束 ---
 
+            # --- 新增：打印统计日志 ---
+            input_len = batch_input.batch['input_ids'].shape[1]
+            output_len = batch_output.batch['responses'].shape[1]
+            print(f"[Step {_step}] Model Time: {model_duration:.4f}s | Env Time: {env_duration:.4f}s | "
+                  f"Input Len: {input_len} | Output Len: {output_len}")
+            # --- 统计结束 ---
             
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
@@ -412,7 +428,7 @@ class TrajectoryCollector:
                     )
         
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
-    
+        
     def dynamic_multi_turn_loop(
             self,
             gen_batch: DataProto, 

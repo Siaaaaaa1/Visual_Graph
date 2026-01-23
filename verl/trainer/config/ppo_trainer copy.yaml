@@ -59,7 +59,7 @@ actor_rollout_ref:
     use_invalid_action_penalty: True
     invalid_action_penalty_coef: 0.1
     use_kl_loss: False
-    use_torch_compile: True
+    use_torch_compile: False
     kl_loss_coef: 0.001
     kl_loss_type: low_var_kl
     ppo_epochs: 1
