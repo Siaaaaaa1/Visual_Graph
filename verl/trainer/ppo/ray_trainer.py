@@ -1169,6 +1169,7 @@ class RayPPOTrainer:
                             responses = batch.batch["responses"]
                             response_length = responses.size(1)
                             response_mask = attention_mask[:, -response_length:]
+
                             rollout_probs = torch.exp(rollout_old_log_probs)
                             actor_probs = torch.exp(actor_old_log_probs)
                             rollout_probs_diff = torch.abs(rollout_probs - actor_probs)
