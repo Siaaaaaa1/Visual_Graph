@@ -107,4 +107,4 @@ python3 -m verl.trainer.main_ppo \
     trainer.val_before_train=false \
     env.node_text_path=./datasets/pubmed_text.json \
     env.dataset_name='pubmed' \
-    ray_init.num_cpus=128
+    ray_init.num_cpus=128 

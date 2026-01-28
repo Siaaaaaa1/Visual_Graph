@@ -120,9 +120,15 @@ def adjust_batch(config, data: DataProto, mode="copy") -> DataProto:
         del data
     elif mode == "copy":
         to_add = size_divisor - remainder
-        dup_indices = np.random.choice(bs, to_add, replace=False)
+        
+        # =========== 修改开始 ===========
+        # 如果需要补充的数量(to_add) 大于 现有总数(bs)，则必须允许重复采样 (replace=True)
+        # 如果 to_add <= bs，则保持 replace=False 以增加数据的多样性
+        enable_replace = to_add > bs
+        dup_indices = np.random.choice(bs, to_add, replace=enable_replace)
+        # =========== 修改结束 ===========
+        
         dup_proto = data.select_idxs(dup_indices)
-
         adjusted_batch = DataProto.concat([data, dup_proto])
     else:
         raise ValueError(f"Unsupported mode: {mode}")

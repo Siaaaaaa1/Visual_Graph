@@ -62,23 +62,36 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
             continue
 
         # 4. check_graph:<view_mode>,<max_nodes>
+        # 优化点 4: 增加鲁棒性处理
         if action.startswith("check_graph:"):
             try:
-                params = action.split(":", 1)[1].split(",")
+                # 预处理：去掉前缀，处理中文逗号，处理多余空格
+                content = action[len("check_graph:"):].strip()
+                content = content.replace("，", ",")
+                
+                params = content.split(",")
 
                 # 必须正好 2 个参数
                 if len(params) != 2:
                     raise ValueError
 
                 view_mode = params[0].strip()
-                max_nodes = int(params[1].strip())
+                max_nodes_str = params[1].strip()
+                
+                # 提取纯数字，防止出现 "20 nodes" 这种情况
+                num_match = re.search(r"\d+", max_nodes_str)
+                if not num_match:
+                     raise ValueError
+                max_nodes = int(num_match.group(0))
 
                 if view_mode not in VALID_VIEW_MODES:
                     raise ValueError
                 if max_nodes <= 0:
                     raise ValueError
-
-                results.append(action)
+                
+                # 重新构造成标准格式返回
+                clean_action = f"check_graph:{view_mode},{max_nodes}"
+                results.append(clean_action)
                 continue
             except:
                 results.append("")

@@ -192,6 +192,8 @@ class FullSequenceSearchMemory(BaseMemory):
     2. Always includes full 'Summary' and 'Action' for every step.
     3. Includes full 'Observation' ONLY for the last `history_length` steps.
        For older steps, 'Observation' is replaced by a placeholder to save tokens.
+    4. Truncates 'Summary' to max_summary_len (default 300 chars).
+    5. Truncates 'Observation' to max_obs_len (default 800 chars).
     """
     def __init__(self):
         self._data = None
@@ -223,39 +225,48 @@ class FullSequenceSearchMemory(BaseMemory):
         obs_key: str,
         action_key: str,
         summary_key: str = "summary",
+        max_summary_len: int = 300,  # Summary 限制 300
+        max_obs_len: int = 800       # Observation 限制 800
     ) -> Tuple[List[str], List[int]]:
-        """
-        Fetch history with full sequence of Actions/Summaries but windowed Observations.
-        """
+        
         memory_contexts, valid_lengths = [], []
 
         for env_idx in range(self.batch_size):
-            # 获取该环境的所有历史记录
             all_history = self._data[env_idx]
             total_steps = len(all_history)
-            
-            # 计算 Observation 开始显示的索引位置
-            # 如果 history_length 为 3，总共 10 步，则 start_obs_idx = 7 (即显示 8, 9, 10 步的 Obs)
             start_obs_idx = max(0, total_steps - history_length)
 
             lines = []
             for i, rec in enumerate(all_history):
                 step_num = i + 1
                 act = rec[action_key]
-                summary = rec.get(summary_key, "")
                 
-                # 关键逻辑：判断是否显示完整 Observation
-                if i >= start_obs_idx:
-                    obs_content = rec[obs_key]
-                    obs_str = f"Observation: {obs_content}"
+                # --- [Summary 处理] ---
+                raw_summary = rec.get(summary_key, "")
+                if raw_summary and len(raw_summary) > max_summary_len:
+                    disp_summary = raw_summary[:max_summary_len] + "..."
                 else:
-                    # 对于旧的历史，省略 Observation 文本以节省上下文
-                    obs_str = "Observation: [Historical observation pruned to save context]"
+                    disp_summary = raw_summary
 
+                # --- [Observation 处理] ---
+                if i >= start_obs_idx:
+                    # 即使是显示的 observation，也要进行截断检查
+                    raw_obs = str(rec[obs_key]) # 确保是字符串
+                    if len(raw_obs) > max_obs_len:
+                        disp_obs = raw_obs[:max_obs_len] + "...(truncated)"
+                    else:
+                        disp_obs = raw_obs
+                    
+                    obs_str = f"Observation: {disp_obs}"
+                else:
+                    # 旧历史，Observation 剪枝
+                    obs_str = ""
+
+                # --- 格式构建 ---
                 block = (
-                    f"Step {step_num}:\n"
-                    f"Summary: {summary}\n"
-                    f"Action: {act}\n"
+                    f"=== Step {step_num} ===\n"
+                    f"<summary>{disp_summary}</summary>\n"
+                    f"<action>{act}</action>\n"
                     f"{obs_str}\n"
                 )
                 lines.append(block)

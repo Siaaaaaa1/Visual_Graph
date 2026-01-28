@@ -26,17 +26,13 @@ from agent_system.multi_turn_rollout.utils import process_image, to_list_of_dict
 from agent_system.environments import EnvironmentManagerBase
 from typing import List, Dict
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+import os
+from PIL import Image
+import json
+import re 
 
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
-        """
-        Initialize the TrajectoryProcessor class.
-        
-        Parameters:
-            config: Configuration object containing data processing settings
-            tokenizer (PreTrainedTokenizer): Tokenizer for text encoding and decoding
-            processor: Image processor for multimodal inputs
-        """
         self.config = config
         self.tokenizer = tokenizer
         self.processor = processor
@@ -46,18 +42,10 @@ class TrajectoryCollector:
         item: int,
         gen_batch: DataProto,
         obs: Dict,
+        step: int = 0,
     ):
         """
-        Process a single observation sample, organizing environment observations (text and/or images) 
-        into a format processable by the model.
-        
-        Parameters:
-            item (int): Sample index in the batch
-            gen_batch (DataProto): Batch data containing original prompts
-            obs (Dict): Environment observation, may contain 'text', 'image', 'anchor' keys
-        
-        Returns:
-            dict: Contains processed input data such as input_ids, attention_mask, etc.
+        Process a single observation sample.
         """
 
         raw_prompt = gen_batch.non_tensor_batch['raw_prompt'][item]
@@ -75,10 +63,27 @@ class TrajectoryCollector:
 
         _obs_anchor = torch_to_numpy(obs_anchor, is_object=True) if isinstance(obs_anchor, torch.Tensor) else obs_anchor
 
-        # Build chat structure
-        # obs_content = raw_prompt[0]['content']
-        # if '<image>' in obs_content: 
-        #     obs_content = obs_content.replace('<image>', '')
+        # --- 图片可视化抽样保存逻辑 ---
+        if is_multi_modal and step > 0 and np.random.random() < 0.01:
+            try:
+                debug_dir = os.path.join(os.getcwd(), 'debug_images')
+                os.makedirs(debug_dir, exist_ok=True)
+                
+                img_to_save = None
+                if isinstance(obs_image, Image.Image):
+                    img_to_save = obs_image
+                elif isinstance(obs_image, (np.ndarray, torch.Tensor)):
+                    img_to_save = process_image(obs_image)
+                
+                if img_to_save:
+                    timestamp = int(time.time() * 1000)
+                    filename = f"step{step}_{timestamp}_{item}_{data_source}.png"
+                    save_path = os.path.join(debug_dir, filename)
+                    img_to_save.save(save_path)
+                    print(f"[Debug] Saved sampled image (Step {step}) to {save_path}")
+            except Exception as e:
+                print(f"[Warning] Failed to save debug image: {e}")
+        # -----------------------------------
 
         # Build chat structure
         obs_content = ''
@@ -137,10 +142,7 @@ class TrajectoryCollector:
                                                                             left_pad=True,
                                                                             truncation=self.config.data.truncation,)
         
-        
-
         if is_multi_modal:
-
             if "Qwen3VLProcessor" in self.processor.__class__.__name__:
                 from verl.models.transformers.qwen3_vl import get_rope_index
             else:
@@ -151,26 +153,38 @@ class TrajectoryCollector:
                 input_ids=input_ids[0],
                 image_grid_thw=image_grid_thw,
                 attention_mask=attention_mask[0],
-            )  # (3, seq_length)
+            ) 
             valid_mask = attention_mask[0].bool()
             text_position_ids = torch.ones((1, len(input_ids[0])), dtype=torch.long)
             text_position_ids[0, valid_mask] = torch.arange(valid_mask.sum().item())
-            position_ids = [torch.cat((text_position_ids, vision_position_ids), dim=0)]  # (1, 4, seq_length)
+            position_ids = [torch.cat((text_position_ids, vision_position_ids), dim=0)] 
         else:
             position_ids = compute_position_id_with_mask(attention_mask)
 
+        # --- 截断内容捕获逻辑 ---
         raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
-        if len(raw_prompt_ids) > self.config.data.max_prompt_length:
+        original_len = len(raw_prompt_ids)
+        truncated_text = ""
+        is_truncated = False
+
+        if original_len > self.config.data.max_prompt_length:
+            is_truncated = True
             if self.config.data.truncation == "left":
+                truncated_ids = raw_prompt_ids[:-self.config.data.max_prompt_length]
                 raw_prompt_ids = raw_prompt_ids[-self.config.data.max_prompt_length :]
             elif self.config.data.truncation == "right":
+                truncated_ids = raw_prompt_ids[self.config.data.max_prompt_length:]
                 raw_prompt_ids = raw_prompt_ids[: self.config.data.max_prompt_length]
             elif self.config.data.truncation == "middle":
                 left_half = self.config.data.max_prompt_length // 2
                 right_half = self.config.data.max_prompt_length - left_half
+                truncated_ids = raw_prompt_ids[left_half:-right_half]
                 raw_prompt_ids = raw_prompt_ids[:left_half] + raw_prompt_ids[-right_half:]
             elif self.config.data.truncation == "error":
                 raise RuntimeError(f"Prompt length {len(raw_prompt_ids)} is longer than {self.config.data.max_prompt_length}.")
+            
+            if is_truncated and truncated_ids:
+                truncated_text = self.tokenizer.decode(truncated_ids, skip_special_tokens=False)
 
         # Build final output dict
         row_dict.update({
@@ -180,7 +194,10 @@ class TrajectoryCollector:
             'raw_prompt_ids': raw_prompt_ids,
             'anchor_obs': _obs_anchor,
             'index': item,
-            'data_source': data_source
+            'data_source': data_source,
+            'final_prompt_text': prompt_with_chat_template,
+            'is_truncated': is_truncated,
+            'truncated_text': truncated_text
         })
 
         if self.config.data.get('return_raw_chat', False):
@@ -191,38 +208,26 @@ class TrajectoryCollector:
     def preprocess_batch(
         self,
         gen_batch: DataProto, 
-        obs: Dict, 
+        obs: Dict,
+        step: int = 0,
     ) -> DataProto:
         """
-        Process a batch of observation samples, converting environment observations into model-processable format.
-        
-        Parameters:
-            gen_batch (DataProto): Batch data containing original prompts
-            obs (Dict): Environment observation dictionary
-                - 'text' (None or List[str]): Text observation data
-                - 'image' (np.ndarray or torch.Tensor): Image observation data
-                - 'anchor' (None or Any): Anchor observation without any histories or additional info. (for GiGPO only).
-        
-        Returns:
-            DataProto: Contains processed batch data with preserved metadata
+        Process a batch of observation samples.
         """
         batch_size = len(gen_batch.batch['input_ids'])
         processed_samples = []
         
-        # Process each sample in parallel
         for item in range(batch_size):
-            # Extract per-sample observations
             processed = self.preprocess_single_sample(
                 item=item,
                 gen_batch=gen_batch,
                 obs=obs,
+                step=step,
             )
             processed_samples.append(processed)
         
-        # Aggregate batch data
         batch = collate_fn(processed_samples)
         
-        # Create DataProto with preserved metadata
         new_batch = DataProto.from_single_dict(
             data=batch,
             meta_info=gen_batch.meta_info
@@ -241,17 +246,7 @@ class TrajectoryCollector:
             tool_callings: np.ndarray,
             ) -> DataProto:
         """
-        Collect and organize trajectory data, handling batch size adjustments to meet parallel training requirements.
-        
-        Parameters:
-            total_batch_list (List[List[Dict]): List of trajectory data for each environment
-            episode_rewards (np.ndarray): Total rewards for each environment
-            episode_lengths (np.ndarray): Total steps for each environment
-            success (Dict[str, np.ndarray]): Success samples for each environment
-            traj_uid (np.ndarray): Trajectory unique identifiers
-            tool_callings (np.ndarray): Number of tool callings for each environment
-        Returns:
-            DataProto: Collected and organized trajectory data
+        Collect and organize trajectory data.
         """
         batch_size = len(total_batch_list)
 
@@ -261,23 +256,17 @@ class TrajectoryCollector:
         
         effective_batch = []
         for bs in range(batch_size):
-            # sum the rewards for each data in total_batch_list[bs]
             for data in total_batch_list[bs]:
                 assert traj_uid[bs] == data['traj_uid'], "data is not from the same trajectory"
                 if data['active_masks']:
-                    # episode_rewards
                     data['episode_rewards'] = episode_rewards[bs]
-                    # episode_lengths
                     data['episode_lengths'] = episode_lengths[bs]
-                    # tool_callings
                     data['tool_callings'] = tool_callings[bs]
-                    # success_rate
                     for key, value in success_rate.items():
                         data[key] = value
 
                     effective_batch.append(data)
             
-        # Convert trajectory data to DataProto format
         gen_batch_output = DataProto.from_single_dict(
             data=collate_fn(effective_batch)
         )
@@ -290,38 +279,27 @@ class TrajectoryCollector:
             envs: EnvironmentManagerBase,
             ) -> DataProto:
         """
-        Collects trajectories through parallel agent-environment agent_loop.
-        Parameters:
-            gen_batch (DataProto): Initial batch with prompts to start the agent_loop
-            actor_rollout_wg (WorkerGroup): Worker group containing the actor model for policy decisions
-            envs (EnvironmentManagerBase): Environment manager containing parallel environment instances
-        
-        Returns:
-            total_batch_list (List[Dict]): List of trajectory data for each environment
-            episode_rewards (np.ndarray): Total rewards for each environment
-            episode_lengths (np.ndarray): Total steps for each environment
-            success (Dict[str, np.ndarray]): Success samples for each environment
-            traj_uid (np.ndarray): Trajectory unique identifiers
+        Collects trajectories through parallel agent-environment loop.
         """
 
         batch_size = len(gen_batch.batch)
 
-        # Initial observations from the environment
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
 
         lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
         assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"
         
-        if self.config.env.rollout.n > 0: # env grouping
+        if self.config.env.rollout.n > 0:
             uid_batch = []
             for i in range(batch_size):
                 if i % self.config.env.rollout.n == 0:
                     uid = str(uuid.uuid4())
                 uid_batch.append(uid)
             uid_batch = np.array(uid_batch, dtype=object)
-        else: # no env grouping, set all to the same uid
+        else:
             uid = str(uuid.uuid4())
             uid_batch = np.array([uid for _ in range(len(gen_batch.batch))], dtype=object)
+            
         is_done = np.zeros(batch_size, dtype=bool)
         traj_uid = np.array([str(uuid.uuid4()) for _ in range(batch_size)], dtype=object)
         total_batch_list = [[] for _ in range(batch_size)]
@@ -329,63 +307,144 @@ class TrajectoryCollector:
         episode_lengths = np.zeros(batch_size, dtype=np.float32)
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
-        # Trajectory collection loop
+
+        think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+        summary_pattern = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
+        action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
+
         for _step in range(self.config.env.max_steps):
             active_masks = np.logical_not(is_done)
 
-            batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
+            batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs, step=_step)
+
+            input_prompts = batch.non_tensor_batch.get('final_prompt_text', [""] * batch_size)
+            truncation_flags = batch.non_tensor_batch.get('is_truncated', [False] * batch_size)
+            truncated_texts = batch.non_tensor_batch.get('truncated_text', [""] * batch_size)
+            
+            # 获取 image_inputs (这是一个 batch 数组，每个元素是一个 dict)
+            image_inputs = batch.non_tensor_batch.get('multi_modal_inputs', None)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
-            non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
+            non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "final_prompt_text", "is_truncated", "truncated_text"]
             if "multi_modal_data" in batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("multi_modal_data")
             if "raw_prompt" in batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("raw_prompt")
             if "tools_kwargs" in batch.non_tensor_batch:
                 non_tensor_batch_keys_to_pop.append("tools_kwargs")
+            
             batch_input = batch.pop(
                 batch_keys=batch_keys_to_pop,
                 non_tensor_batch_keys=non_tensor_batch_keys_to_pop,
             )
 
             batch_input.meta_info = gen_batch.meta_info
-
-            # pad to be divisible by dp_size
             batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
             
-            # --- 新增计时：模型交互开始 ---
+            # --- Model Interaction ---
             model_start_time = time.time()
             batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
-            # # unpad
             batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
             model_duration = time.time() - model_start_time
-            # --- 新增计时：模型交互结束 ---
-
+            
             batch.non_tensor_batch['uid'] = uid_batch
             batch.non_tensor_batch['traj_uid'] = traj_uid
-
             batch = batch.union(batch_output)
             
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             
-            # --- 新增计时：环境交互开始 ---
+            # 将模型的原始文本响应写入 Batch
+            batch.non_tensor_batch['model_response_text'] = np.array(text_actions, dtype=object)
+
+            # --- Env Interaction ---
             env_start_time = time.time()
             next_obs, rewards, dones, infos = envs.step(text_actions)
             env_duration = time.time() - env_start_time
-            # --- 新增计时：环境交互结束 ---
 
-            # --- 新增：打印统计日志 ---
-            input_len = batch_input.batch['input_ids'].shape[1]
-            output_len = batch_output.batch['responses'].shape[1]
-            print(f"[Step {_step}] Model Time: {model_duration:.4f}s | Env Time: {env_duration:.4f}s | "
-                  f"Input Len: {input_len} | Output Len: {output_len}")
-            # --- 统计结束 ---
-            
+            print(f"\n{'='*40} STEP {_step} DETAILS {'='*40}")
+            input_len_batch = batch_input.batch['input_ids'].shape[1]
+            output_len_batch = batch_output.batch['responses'].shape[1]
+            print(f"Stats: ModelTime={model_duration:.2f}s, EnvTime={env_duration:.2f}s, InputLen={input_len_batch}, OutputLen={output_len_batch}")
+
+            for i in range(batch_size):
+                if i >= 1: break 
+                
+                print(f"\n--- [Sample {i}] ---")
+                
+                valid_input_len = batch_input.batch['attention_mask'][i].sum().item()
+                img_info = "No Image"
+                
+                # --- [修正逻辑 Start] ---
+                # 1. 显式检查 is not None，避免 numpy array 的 truth value ambiguous 错误
+                if image_inputs is not None:
+                    # 2. image_inputs 是一个 Object Array，先用 [i] 取出当前样本的字典
+                    sample_inputs = image_inputs[i]
+                    
+                    if isinstance(sample_inputs, dict):
+                        if 'image_grid_thw' in sample_inputs:
+                             # 3. 直接访问字典内的值，不需要再加 [i]
+                             grid = sample_inputs['image_grid_thw']
+                             img_shape = grid.tolist() if hasattr(grid, 'tolist') else str(grid)
+                             img_info = f"Grid Shape: {img_shape}"
+                        elif 'pixel_values' in sample_inputs:
+                             pv = sample_inputs['pixel_values']
+                             if isinstance(pv, list):
+                                 img_info = f"Pixel Values: {len(pv)} images"
+                             else:
+                                 img_info = f"Pixel Values Shape: {pv.shape}"
+                # --- [修正逻辑 End] ---
+                
+                print(f"[Input Stats] Text Len: {valid_input_len} | Image Info: {img_info}")
+
+                print(f"[Input Prompt] (Start): {input_prompts[i][:200]} ...")
+                print(f"[Input Prompt] (End): ... {input_prompts[i][-500:]}")
+                
+                if truncation_flags[i]:
+                    print(f"\n[!!! WARNING: TRUNCATED !!!]")
+                    print(f"[Truncated Content]: {truncated_texts[i]}")
+                
+                response_text = text_actions[i]
+                print(f"\n[Full Model Response]:\n{response_text}")
+
+                think = "N/A"
+                summary = "N/A"
+                action = "N/A"
+
+                if infos and i < len(infos):
+                    info = infos[i]
+                    think = info.get('parsed_think', None)
+                    summary = info.get('parsed_summary', None)
+                    action = info.get('parsed_action_content', None)
+                
+                if not think: 
+                    m = think_pattern.search(response_text)
+                    think = m.group(1).strip() if m else "Not Found"
+                if not summary:
+                    m = summary_pattern.search(response_text)
+                    summary = m.group(1).strip() if m else "Not Found"
+                if not action or action == "No Action Found":
+                    m = action_pattern.search(response_text)
+                    action = m.group(1).strip() if m else "Not Found"
+
+                print(f"\n[Parsed Structure]")
+                print(f"  > Think: {think[:300]}..." if len(str(think)) > 300 else f"  > Think: {think}")
+                print(f"  > Summary: {summary}")
+                print(f"  > Action: {action}")
+
+                feedback = next_obs['text'][i]
+                print(f"\n[Environment Feedback]:\n{feedback[:1000]}..." if len(feedback) > 1000 else f"\n[Environment Feedback]:\n{feedback}")
+                print("-" * 60)
+
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
             if len(dones.shape) == 2:
-                # dones is numpy, delete a dimension
                 dones = dones.squeeze(1)
+
+            # 将解析后的结构化数据 (Think/Summary/Action) 写入 Batch
+            if infos:
+                batch.non_tensor_batch['parsed_think'] = np.array([info.get('parsed_think', '') for info in infos], dtype=object)
+                batch.non_tensor_batch['parsed_summary'] = np.array([info.get('parsed_summary', '') for info in infos], dtype=object)
+                batch.non_tensor_batch['parsed_action'] = np.array([info.get('parsed_action_content', '') for info in infos], dtype=object)
 
             if 'is_action_valid' in infos[0]:
                 batch.non_tensor_batch['is_action_valid'] = np.array([info['is_action_valid'] for info in infos], dtype=bool)
@@ -394,29 +453,22 @@ class TrajectoryCollector:
 
             if 'tool_calling' in infos[0]:
                 tool_callings[active_masks] += np.array([info['tool_calling'] for info in infos], dtype=np.float32)[active_masks]
-            # Create reward tensor, only assign rewards for active environments
-            # episode_rewards += torch_to_numpy(rewards) * torch_to_numpy(active_masks)
+            
             episode_rewards[active_masks] += torch_to_numpy(rewards)[active_masks]
             episode_lengths[active_masks] += 1
 
-            assert len(rewards) == batch_size, f"env should return rewards for all environments, got {len(rewards)} rewards for {batch_size} environments"
             batch.non_tensor_batch['rewards'] = torch_to_numpy(rewards, is_object=True)
             batch.non_tensor_batch['active_masks'] = torch_to_numpy(active_masks, is_object=True)
             
-            # Update episode lengths for active environments
             batch_list: list[dict] = to_list_of_dict(batch)
 
             for i in range(batch_size):
                 total_batch_list[i].append(batch_list[i])
                 total_infos[i].append(infos[i])
 
-            # Update done states
             is_done = np.logical_or(is_done, dones)
-                
-            # Update observations for next step
             obs = next_obs
 
-            # Break if all environments are done
             if is_done.all():
                 break
         
@@ -428,7 +480,7 @@ class TrajectoryCollector:
                     )
         
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
-        
+            
     def dynamic_multi_turn_loop(
             self,
             gen_batch: DataProto, 
@@ -437,20 +489,6 @@ class TrajectoryCollector:
             ) -> DataProto:
         """
         Conduct dynamic rollouts until a target batch size is met. 
-        Keeps sampling until the desired number of effective trajectories is collected.
-        Adopted from DAPO (https://arxiv.org/abs/2503.14476)
-
-        Args:
-            gen_batch (DataProto): Initial batch for rollout.
-            actor_rollout_wg: Actor model workers for generating responses.
-            envs (EnvironmentManagerBase): Environment manager instance.
-
-        Returns:
-            total_batch_list (List[Dict]): Complete set of rollout steps.
-            total_episode_rewards (np.ndarray): Accumulated rewards.
-            total_episode_lengths (np.ndarray): Lengths per episode.
-            total_success (Dict[str, np.ndarray]): Success metrics.
-            total_traj_uid (np.ndarray): Trajectory IDs.
         """
         total_batch_list = []
         total_episode_rewards = []
@@ -505,42 +543,19 @@ class TrajectoryCollector:
             is_train: bool = True,
             ) -> DataProto:
         """
-        Select and run the appropriate rollout loop (dynamic or vanilla).
-
-        Args:
-            gen_batch (DataProto): Initial prompt batch.
-            actor_rollout_wg: Actor model workers.
-            envs (EnvironmentManagerBase): Environment manager for interaction.
-            is_train (bool): Whether in training mode (affects dynamic sampling).
-
-        Returns:
-            DataProto: Final collected trajectory data with metadata.
+        Select and run the appropriate rollout loop.
         """
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
             
-        # Initial observations from the environment
         if self.config.algorithm.filter_groups.enable and is_train:
-            # Dynamic Sampling (for DAPO and Dynamic GiGPO)
             total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
-                self.dynamic_multi_turn_loop(
-                gen_batch=gen_batch,
-                actor_rollout_wg=actor_rollout_wg,
-                envs=envs,
-            )
+                self.dynamic_multi_turn_loop(gen_batch=gen_batch, actor_rollout_wg=actor_rollout_wg, envs=envs)
         else:
-            # Vanilla Sampling   
             total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
-                self.vanilla_multi_turn_loop(
-                gen_batch=gen_batch,
-                actor_rollout_wg=actor_rollout_wg,
-                envs=envs,
-            )
-        assert len(total_batch_list) == len(total_episode_rewards)
-        assert len(total_batch_list) == len(total_episode_lengths)
-        assert len(total_batch_list) == len(total_traj_uid)
-        assert len(total_batch_list) == len(totoal_tool_callings)
+                self.vanilla_multi_turn_loop(gen_batch=gen_batch, actor_rollout_wg=actor_rollout_wg, envs=envs)
         
+        assert len(total_batch_list) == len(total_episode_rewards)
 
         # Create trajectory data
         gen_batch_output: DataProto = self.gather_rollout_data(
@@ -551,5 +566,88 @@ class TrajectoryCollector:
             traj_uid=total_traj_uid,
             tool_callings=totoal_tool_callings,
         )
+        
+        # --- 优化后的保存逻辑 Start ---
+        REMOVE_KEYS = ['pixel_values', 'image_grid_thw'] 
+        PARENT_KEY = 'multi_modal_inputs' 
+        # 指定需要排到最后的字段列表
+        END_KEYS = ['model_response_text', 'anchor_obs', 'final_prompt_text', 'raw_prompt', 'parsed_think']
+
+        def make_serializable(obj):
+            if isinstance(obj, torch.Tensor):
+                return obj.detach().cpu().tolist()
+            elif isinstance(obj, (np.ndarray, np.generic)):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                return obj.item()
+            elif isinstance(obj, dict):
+                return {k: make_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [make_serializable(x) for x in obj]
+            elif isinstance(obj, bytes):
+                try:
+                    return obj.decode('utf-8')
+                except:
+                    return str(obj)
+            return obj
+
+        output_dir = os.path.join(os.getcwd(), 'test')
+        os.makedirs(output_dir, exist_ok=True)
+        output_file = os.path.join(output_dir, 'guiji.jsonl')
+
+        non_tensor_data = gen_batch_output.non_tensor_batch
+        if non_tensor_data:
+            all_keys = list(non_tensor_data.keys())
+            batch_size = len(non_tensor_data[all_keys[0]])
+
+            # 1. 筛选出中间字段：排除掉 index 和 需要放到最后的 END_KEYS
+            # 注意：step_in_traj 是我们在循环中生成的，不属于原始 key
+            middle_keys = [k for k in all_keys if k != 'index' and k not in END_KEYS]
+            
+            # 2. 筛选出数据中实际存在的 END_KEYS (防止硬编码的 key 不存在报错)
+            valid_end_keys = [k for k in END_KEYS if k in all_keys]
+
+            # 用于计算 step_in_traj 的状态变量
+            last_traj_uid = None
+            step_counter = 0
+
+            with open(output_file, 'a', encoding='utf-8') as f:
+                for i in range(batch_size):
+                    row = {} # Python 3.7+ 字典保证插入顺序
+
+                    # --- A. 头部字段: index ---
+                    if 'index' in non_tensor_data:
+                        row['index'] = make_serializable(non_tensor_data['index'][i])
+                    
+                    # --- B. 头部字段: step_in_traj (轨迹内序号) ---
+                    # 获取当前样本的 traj_uid
+                    current_traj_uid = str(non_tensor_data['traj_uid'][i]) if 'traj_uid' in non_tensor_data else "unknown"
+                    
+                    # 如果 traj_uid 变了，说明是新的一条轨迹，重置计数器
+                    # (gather_rollout_data 保证了同一轨迹的数据是连续的)
+                    if last_traj_uid != current_traj_uid:
+                        step_counter = 0
+                        last_traj_uid = current_traj_uid
+                    else:
+                        step_counter += 1
+                    
+                    row['step_in_traj'] = step_counter
+
+                    # --- C. 中间字段 (动态处理，包含 action 等任意字段) ---
+                    for key in middle_keys:
+                        raw_val = non_tensor_data[key][i]
+                        # 特殊清理逻辑：清理 multi_modal_inputs
+                        if key == PARENT_KEY and isinstance(raw_val, dict):
+                            raw_val = {k: v for k, v in raw_val.items() if k not in REMOVE_KEYS}
+                        
+                        row[key] = make_serializable(raw_val)
+                    
+                    # --- D. 尾部字段 (大文本) ---
+                    for key in valid_end_keys:
+                        raw_val = non_tensor_data[key][i]
+                        row[key] = make_serializable(raw_val)
+
+                    f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+        # --- 优化后的保存逻辑 End ---
         
         return gen_batch_output
