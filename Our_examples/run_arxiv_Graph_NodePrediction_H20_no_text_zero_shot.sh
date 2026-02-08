@@ -17,7 +17,7 @@ val_data_size=256
 group_size=8
 MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
 
-ppo_mini_batch_size=1024
+ppo_mini_batch_size=512
 # 保持为 4，关闭 remove_padding 后显存压力变大，4 是 H20 的安全水位
 micro_batch_size=2
 
@@ -83,7 +83,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.max_model_len=8192 \
     actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.5 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=False \
@@ -112,4 +112,5 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=10 \
     trainer.val_before_train=false \
     ray_init.num_cpus=64 \
+    env.graph_setting=no_text_zero_shot \
     actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee >(sed -u -E 's/\x1b\[[0-9;]*m//g; s/\((WorkerDict|TaskRunner) pid=[0-9]*\)//g' > "$LOG_FILE")

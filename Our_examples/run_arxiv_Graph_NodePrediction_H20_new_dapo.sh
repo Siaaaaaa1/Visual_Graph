@@ -7,6 +7,8 @@ export VERL_PPO_ASYNC_ROLLOUT=1
 export WANDB_API_KEY="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"
 export MASTER_ADDRESS=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 export WORLD_SIZE=8
+export CUDA_LAUNCH_BLOCKING=1
+export HYDRA_FULL_ERROR=1
 
 ENGINE=${1:-vllm}
 num_cpus_per_env_worker=1.0
@@ -16,6 +18,11 @@ train_data_size=32
 val_data_size=256
 group_size=8
 MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
+
+clip_ratio_low=0.2
+clip_ratio_high=0.28
+enable_filter_groups=True
+max_num_gen_batches=10
 
 ppo_mini_batch_size=1024
 # 保持为 4，关闭 remove_padding 后显存压力变大，4 是 H20 的安全水位
@@ -112,4 +119,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.total_epochs=10 \
     trainer.val_before_train=false \
     ray_init.num_cpus=64 \
+    actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
+    actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
+    algorithm.filter_groups.enable=${enable_filter_groups} \
+    algorithm.filter_groups.max_num_gen_batches=${max_num_gen_batches} \
     actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee >(sed -u -E 's/\x1b\[[0-9;]*m//g; s/\((WorkerDict|TaskRunner) pid=[0-9]*\)//g' > "$LOG_FILE")

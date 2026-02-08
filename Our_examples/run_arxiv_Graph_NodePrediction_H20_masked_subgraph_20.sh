@@ -5,7 +5,11 @@ export VLLM_ATTENTION_BACKEND=FLASHINFER
 export VERL_PPO_ASYNC_ROLLOUT=1 
 
 export WANDB_API_KEY="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"
-export MASTER_ADDRESS=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
+
+# === 修改重点: 直接指定本地地址，不再依赖 ip 命令 ===
+export MASTER_ADDRESS=127.0.0.1
+# ===============================================
+
 export WORLD_SIZE=8
 
 ENGINE=${1:-vllm}
@@ -17,7 +21,7 @@ val_data_size=256
 group_size=8
 MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
 
-ppo_mini_batch_size=1024
+ppo_mini_batch_size=512
 # 保持为 4，关闭 remove_padding 后显存压力变大，4 是 H20 的安全水位
 micro_batch_size=2
 
@@ -77,8 +81,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
     actor_rollout_ref.rollout.max_model_len=8192 \
@@ -86,10 +90,10 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.enforce_eager=False \
-    actor_rollout_ref.rollout.free_cache_engine=False \
+    actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=4 \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
@@ -111,5 +115,6 @@ python3 -m verl.trainer.main_ppo \
     trainer.test_freq=10 \
     trainer.total_epochs=10 \
     trainer.val_before_train=false \
-    ray_init.num_cpus=64 \
+    ray_init.num_cpus=16 \
+    env.graph_setting=masked_subgraph_20 \
     actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee >(sed -u -E 's/\x1b\[[0-9;]*m//g; s/\((WorkerDict|TaskRunner) pid=[0-9]*\)//g' > "$LOG_FILE")
