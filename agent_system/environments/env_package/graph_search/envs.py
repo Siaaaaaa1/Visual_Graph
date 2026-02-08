@@ -17,9 +17,12 @@ class GraphSearchEnv:
                  node_text_db: Dict[str, str], 
                  dataset_name: str, 
                  dataset_dir: str,
-                 shared_graph_data: Optional[Tuple[Dict, Dict]] = None):
+                 graph_setting: str = "standard_20", 
+                 # 核心：支持接收完整的 4元组 (包含矩阵)
+                 shared_graph_data: Optional[Tuple[Dict, Dict, Dict, Any]] = None):
         self.max_steps = max_steps
         self.node_text_db = node_text_db
+        self.graph_setting = graph_setting
         self.visualizer = GraphVisualizer(
             dataset_name=dataset_name, 
             dataset_dir=dataset_dir,
@@ -43,29 +46,53 @@ class GraphSearchEnv:
         self._reset_internal()
 
         self.center_id = kwargs["center_id"]
-        self.center_text = kwargs.get(
-            "center_text", 
-            self.node_text_db.get(str(self.center_id), "No text available.")
-        )
+        
+        # 解析 Graph Setting
+        show_center_text = True
+        init_view_mode = "center"
+        init_max_nodes = 1
+        mask_neighbors_init = False
+        
+        setting = self.graph_setting.lower()
+        
+        if "no_text" in setting or "zero_shot" in setting:
+            show_center_text = False
+            init_view_mode = "center"
+            init_max_nodes = 1
+        elif "center_only" in setting or "start_from_center" in setting:
+            show_center_text = True
+            init_view_mode = "center"
+            init_max_nodes = 1
+        else:
+            show_center_text = True
+            init_view_mode = "1-hop+sim"
+            if "50" in setting:
+                init_max_nodes = 50
+            else:
+                init_max_nodes = 20
+            if "masked" in setting or "no_color" in setting:
+                mask_neighbors_init = True
+            else:
+                mask_neighbors_init = False
+
+        if show_center_text:
+            raw_text = self.node_text_db.get(str(self.center_id), "No text available.")
+            self.center_text = raw_text
+        else:
+            self.center_text = "[Text Hidden. Explore to read.]"
+
         self.answer = kwargs["answer"]
         
         stats = self.visualizer.get_node_degree_info(self.center_id)
-        # 优化点 1: 候选类别逻辑在 visualizer 中已增强
         candidates = self.visualizer.get_candidate_classes(self.center_id, top_k=100)
         candidates_str = "\n".join(candidates)
         
-        # 优化点 5: 初始图设定为 2-hop, 20节点
-        # img_bytes, legend_dict = self.visualizer.draw_subgraph(
-        #     self.center_id, 
-        #     view_mode="center",
-        #     max_nodes=1,
-        #     color_seed=self.episode_color_seed 
-        # )
         img_bytes, legend_dict = self.visualizer.draw_subgraph(
             self.center_id, 
-            view_mode="2-hop",  # 修改：从 center 改为 2-hop
-            max_nodes=20,       # 修改：从 1 改为 20
-            color_seed=self.episode_color_seed 
+            view_mode=init_view_mode,
+            max_nodes=init_max_nodes,
+            color_seed=self.episode_color_seed,
+            mask_neighbors=mask_neighbors_init
         )
         
         pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -78,7 +105,12 @@ class GraphSearchEnv:
             "step": self.step_count
         }
         legend_str = self._format_legend(legend_dict)
-        # Obs 纯文本
+        
+        if init_view_mode == "center":
+            view_desc = "Center Node Only (Initial State)"
+        else:
+            view_desc = f"Initial Subgraph (Mode: {init_view_mode}, Max: {init_max_nodes} nodes, Colors: {'Hidden' if mask_neighbors_init else 'Shown'})"
+
         obs = (
             f"Current Agent Task: Classify Node {self.center_id}.\n"
             f"Center Node Info:\n"
@@ -86,52 +118,32 @@ class GraphSearchEnv:
             f"- In-Degree: {stats['in_degree']}, Out-Degree: {stats['out_degree']}\n"
             f"- 1-Hop Neighbors: {stats['neighbor_count_1hop']}\n\n"
             f"Candidate Categories: {candidates_str}\n\n"
-            f"Current View: Initial 2-hop subgraph (Max 20 nodes). Use 'check_graph' to update view."
+            f"Current View: {view_desc}. Use 'check_graph' to update view."
             f"legend: {legend_str}"
         )
 
         return obs, self.current_image, infos
 
     def step(self, raw_input: str):
-        """
-        raw_input: 这是一个混合容错接口。
-        1. 它可以是 projection 清洗过的纯命令 (例如 'check_node:123')
-        2. 也可以是包含 XML 标签的原始字符串 (例如 '<action>check_node:123</action>')
-        """
-        
-        # ------------------- 容错解析逻辑 -------------------
+        # 容错解析逻辑
         current_action = ""
         think_content = None
         summary_content = None
 
-        # 1. 优先尝试正则提取 (应对带标签的情况)
-        # re.DOTALL 让 . 匹配换行符
         action_match = re.search(r"<action>(.*?)</action>", raw_input, re.DOTALL | re.IGNORECASE)
         
         if action_match:
-            # Case A: 即使传进来的是 XML，我们也能提取
             current_action = action_match.group(1).strip()
-            
-            # 顺便提取一下 think/summary (如果有的话)，方便 info 记录
             t_match = re.search(r"<think>(.*?)</think>", raw_input, re.DOTALL | re.IGNORECASE)
             if t_match: think_content = t_match.group(1).strip()
-            
             s_match = re.search(r"<summary>(.*?)</summary>", raw_input, re.DOTALL | re.IGNORECASE)
             if s_match: summary_content = s_match.group(1).strip()
-            
         else:
-            # Case B: 没有标签，假设输入本身就是纯命令 (应对 Projection 后的情况)
             current_action = raw_input.strip()
         
-        # 2. 空值检查
-        # 如果 projection 失败传了空字符串，或者 xml 提取出来是空的
         if not current_action:
-            err_obs = "Error: Invalid action format. Could not parse command. Please check your output format."
-            if self.current_image is not None:
-                img_ret = self.current_image.copy()
-            else:
-                img_ret = np.zeros((1024, 1024, 3), dtype=np.uint8)
-            
+            err_obs = "Error: Invalid action format."
+            img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024, 1024, 3), dtype=np.uint8)
             info = {
                 "step": self.step_count,
                 "seen_nodes": list(self.seen_nodes),
@@ -142,13 +154,8 @@ class GraphSearchEnv:
             }
             return err_obs, img_ret, 0, False, info
 
-        # ------------------------------------------------------------------
-
         if self.done:
-            if self.current_image is not None:
-                img_ret = self.current_image.copy()
-            else:
-                img_ret = np.zeros((1024, 1024, 3), dtype=np.uint8)
+            img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024, 1024, 3), dtype=np.uint8)
             return "", img_ret, 0, True, {}
 
         self.step_count += 1
@@ -158,7 +165,6 @@ class GraphSearchEnv:
         
         if current_action.startswith("check_graph:"):
             try:
-                # 兼容性处理：无论上游是否处理过，这里再做一次分割是最安全的
                 params = current_action.split(":", 1)[1].strip().split(",")
                 view_mode = params[0].strip()
                 max_nodes = int(params[1].strip())
@@ -167,7 +173,8 @@ class GraphSearchEnv:
                     self.center_id,
                     view_mode=view_mode,
                     max_nodes=max_nodes,
-                    color_seed=self.episode_color_seed 
+                    color_seed=self.episode_color_seed,
+                    mask_neighbors=False # 主动check_graph默认显示颜色
                 )
                 
                 pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -209,7 +216,6 @@ class GraphSearchEnv:
             if pred.lower().strip().strip(".'\"") == self.answer.lower().strip().strip(".'\""):
                 reward = 1
         else:
-            # 这里的 raw_input 可能很长，info 里只记录截断的，避免日志爆炸
             display_act = current_action[:50] + "..." if len(current_action) > 50 else current_action
             obs = f"Invalid action: '{display_act}' is not a valid command."
 
@@ -226,7 +232,7 @@ class GraphSearchEnv:
             "parsed_action": current_action
         }
         
-        step_image = self.current_image.copy()
+        step_image = self.current_image.copy() if self.current_image is not None else None
 
         return obs, step_image, reward, done, info
 
@@ -242,13 +248,37 @@ def build_graph_search_envs(
     max_steps = env_config.max_steps
     dataset_name = getattr(env_config, "dataset_name", "cora")
     dataset_dir = getattr(env_config, "dataset_dir", "./datasets")
+    graph_setting = getattr(env_config, "graph_setting", "standard_20")
 
     with open(env_config.node_text_path, "r", encoding="utf-8") as f:
         node_text_db = json.load(f)
 
-    print(f"[build_envs] Pre-loading graph data for {dataset_name}...")
-    shared_graph_data = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)
-    print(f"[build_envs] Load complete.")
+    # =========================================================================
+    # 核心内存优化：在主进程加载一次数据并构建大矩阵
+    # =========================================================================
+    print(f"[build_envs] Pre-loading graph data and building feature matrix for {dataset_name}...")
+    
+    # 1. 加载原始 JSON 数据
+    g_data, r_adj, c_map = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)
+    
+    # 2. 构建特征矩阵 (利用临时 Visualizer 实例，避免手动复制代码逻辑)
+    # shared_data 的第4个元素传 None，触发 Visualizer 内部的构建逻辑
+    temp_viz = GraphVisualizer(
+        dataset_name=dataset_name, 
+        dataset_dir=dataset_dir,
+        shared_data=(g_data, r_adj, c_map, None) 
+    )
+    feat_matrix = temp_viz.feat_matrix
+    
+    print(f"[build_envs] Matrix built successfully. Shape: {feat_matrix.shape}, "
+          f"Size: {feat_matrix.nbytes / 1024**2:.2f} MB")
+    
+    # 3. 打包共享数据 (4元组)
+    # 传递这个 payload 给所有 worker，它们将引用同一块内存 (只读)
+    shared_payload = (g_data, r_adj, c_map, feat_matrix)
+    
+    print(f"[build_envs] Shared payload ready. Graph Setting: {graph_setting}")
+    # =========================================================================
 
     envs = [
         GraphSearchEnv(
@@ -256,7 +286,8 @@ def build_graph_search_envs(
             node_text_db=node_text_db, 
             dataset_name=dataset_name,
             dataset_dir=dataset_dir,
-            shared_graph_data=shared_graph_data
+            graph_setting=graph_setting, 
+            shared_graph_data=shared_payload # 传入共享数据
         )
         for _ in range(batch_size)
     ]

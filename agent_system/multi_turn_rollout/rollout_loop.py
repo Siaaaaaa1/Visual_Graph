@@ -284,7 +284,13 @@ class TrajectoryCollector:
 
         batch_size = len(gen_batch.batch)
 
-        obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
+        env_kwargs = gen_batch.non_tensor_batch.get('env_kwargs', None)
+        
+        # 依然保留防御性逻辑，防止数据源本身就没有这个 key
+        if env_kwargs is None:
+             env_kwargs = [{}] * batch_size
+             
+        obs, infos = envs.reset(kwargs=env_kwargs)
 
         lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
         assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"

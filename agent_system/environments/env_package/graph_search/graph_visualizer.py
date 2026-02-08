@@ -5,7 +5,7 @@ import random
 import hashlib
 import networkx as nx
 import matplotlib
-# 强制使用非交互式后端
+# 强制使用非交互式后端，防止在无显示器的服务器上报错
 matplotlib.use("Agg") 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,7 +29,7 @@ class GraphVisualizer:
         reverse_adj = {}
         
         nodes_list = raw_data.get("nodes", [])
-        class_map = raw_data.get("class_map", {}) # 文件2特有
+        class_map = raw_data.get("class_map", {}) 
         
         for node in nodes_list:
             feature = node.get("feature", None)
@@ -55,7 +55,8 @@ class GraphVisualizer:
     def __init__(self, 
                  dataset_name: str, 
                  dataset_dir: str = "./datasets", 
-                 shared_data: Optional[Tuple[Dict, Dict, Dict]] = None):
+                 # 修改类型注解，支持接收第4个元素 feat_matrix (Any类型)
+                 shared_data: Optional[Tuple[Dict, Dict, Dict, Any]] = None):
         
         self.BASE_FIG_SIZE = 10
         self.NODE_SCALE_FACTOR = 0.05
@@ -80,31 +81,45 @@ class GraphVisualizer:
         
         # 2. 数据加载
         if shared_data is not None:
-            self.graph_data, self.reverse_adj, self.class_map = shared_data
+            # 关键修改：解包 4 个元素，直接复用传入的预构建 feat_matrix
+            # 如果 shared_data 的第4个元素是 None，说明需要自己构建
+            if len(shared_data) == 4:
+                self.graph_data, self.reverse_adj, self.class_map, matrix_candidate = shared_data
+                if matrix_candidate is not None:
+                    self.feat_matrix = matrix_candidate
+                else:
+                    self.feat_matrix = self._build_feat_matrix()
+            else:
+                # 兼容旧逻辑 (3元组)
+                self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
+                self.feat_matrix = self._build_feat_matrix()
         else:
             self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
+            # 只有在没有共享数据时才在本地构建
+            self.feat_matrix = self._build_feat_matrix()
         
         self.all_node_ids = list(self.graph_data.keys())
-        
-        # 3. 构建特征矩阵 (文件2的核心优化逻辑)
-        # 为了支持 _select_nodes 中的向量化计算，这里预处理 feature matrix
-        print("Building feature matrix for vectorized similarity...")
         self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
-        
-        # 预先计算 L2 归一化的特征矩阵
+
+    def _build_feat_matrix(self):
+        """
+        辅助方法：构建特征矩阵。将逻辑抽离出来，方便在外部调用或内部复用。
+        """
+        print("Building feature matrix (Process Local)...")
+        # 确保顺序与 self.graph_data.keys() 一致
+        all_ids = list(self.graph_data.keys())
         features_list = []
-        for nid in self.all_node_ids:
+        for nid in all_ids:
             raw_feat = self.graph_data[nid]["feature"]
             arr = np.array(raw_feat, dtype=np.float32)
             norm = np.linalg.norm(arr)
-            # 避免除零
             if norm > 1e-9:
                 arr = arr / norm
             else:
                 arr = np.zeros_like(arr)
             features_list.append(arr)
             
-        self.feat_matrix = np.stack(features_list) # Shape: [N, D]
+        return np.stack(features_list) # Shape: [N, D]
 
     def _get_node_info(self, node_id: int) -> Dict:
         return self.graph_data.get(str(node_id), {"neighbors": [], "pred_class": "Unknown"})
@@ -140,23 +155,15 @@ class GraphVisualizer:
 
     def _get_similarity(self, center_id: int, node_id: int) -> float:
         """
-        计算单点相似度。
-        虽然有矩阵，但在处理单个边权重时（draw_subgraph中），
-        直接用原始数据点积有时比查索引再切片更方便，
-        或者为了保持接口兼容性，保留此函数。
+        计算单点相似度。优先使用矩阵加速计算。
         """
-        # 注意：因为 __init__ 里已经做了归一化矩阵，如果想极速，可以用矩阵查。
-        # 但为了稳健性（防止 id 找不到 idx），这里保留原始的点积逻辑，
-        # 且复用 __init__ 里的归一化思路。
-        
-        # 简单直接计算 (利用已归一化的矩阵加速)
         c_str, n_str = str(center_id), str(node_id)
         if c_str in self.id_to_idx and n_str in self.id_to_idx:
             idx1 = self.id_to_idx[c_str]
             idx2 = self.id_to_idx[n_str]
             return float(np.dot(self.feat_matrix[idx1], self.feat_matrix[idx2]))
         
-        # Fallback (如果没有构建矩阵)
+        # Fallback (如果没有构建矩阵或ID未找到)
         f1 = np.array(self.graph_data[str(center_id)]["feature"], dtype=np.float32)
         f2 = np.array(self.graph_data[str(node_id)]["feature"], dtype=np.float32)
         denom = (np.linalg.norm(f1) * np.linalg.norm(f2))
@@ -165,10 +172,6 @@ class GraphVisualizer:
         return float(np.dot(f1, f2) / denom)
 
     def get_candidate_classes(self, center_id: int, top_k: int = 100) -> List[str]:
-        """
-        (采用文件2的优化逻辑)
-        除了 BFS 邻居，还加入 Top-20 全局相似节点的类别。
-        """
         # 1. BFS 邻居
         candidates = set()
         queue = [center_id]
@@ -244,10 +247,6 @@ class GraphVisualizer:
         }
 
     def _select_nodes(self, center_id: int, view_mode: str, max_nodes: int, undirected: bool) -> List[int]:
-        """
-        (采用文件2的优化逻辑)
-        利用矩阵运算 (feat_matrix) 快速进行节点筛选，替代 Python 循环。
-        """
         if view_mode == "center":
             return [center_id]
         
@@ -265,14 +264,12 @@ class GraphVisualizer:
         selected = []
         budget = max_nodes
         
-        # 准备矩阵索引
         c_str = str(center_id)
         if c_str not in self.id_to_idx:
             return [center_id] + list(neighbors_1hop)[:budget] # Fallback
         c_idx = self.id_to_idx[c_str]
 
         # 计算所有节点到中心的相似度 (向量化)
-        # sim_scores: shape [N]
         sim_scores = self.feat_matrix @ self.feat_matrix[c_idx]
 
         if view_mode in ["1-hop", "2-hop", "1-hop+sim", "2-hop+sim"]:
@@ -280,8 +277,6 @@ class GraphVisualizer:
             if "2-hop" in view_mode:
                 pool.extend(list(neighbors_2hop))
             
-            # 对 pool 里的节点按相似度排序
-            # 使用列表推导 + sort，因为 pool 通常不大，这样做比全量 argpartition 更灵活
             pool_scores = []
             for nid in pool:
                 n_str = str(nid)
@@ -305,26 +300,17 @@ class GraphVisualizer:
                     remain = budget - len(selected)
                     
                     if remain > 0:
-                        # 全局补全
-                        # 排除已选中的、中心点、以及 pool 中的点
                         exclude_indices = {self.id_to_idx[str(n)] for n in selected if str(n) in self.id_to_idx}
                         exclude_indices.add(c_idx)
                         
-                        # 把要排除的分数设极低
-                        # 这里为了不破坏原始 sim_scores (虽然下面重新计算也没事)，拷贝一份 mask
                         temp_scores = sim_scores.copy()
-                        # 需要排除的点位置设为 -10
-                        # 注意：这里需要先把 indices 转为 list
                         temp_scores[list(exclude_indices)] = -10.0
                         
-                        # Top-K
-                        # argpartition 找到最大的 remain 个
                         top_k_indices = np.argpartition(temp_scores, -remain)[-remain:]
-                        # 排序这 remain 个
                         top_k_indices = top_k_indices[np.argsort(temp_scores[top_k_indices])[::-1]]
                         
                         for idx in top_k_indices:
-                            if temp_scores[idx] > -9.0: # 只要没被 mask 掉
+                            if temp_scores[idx] > -9.0:
                                 selected.append(int(self.all_node_ids[idx]))
 
         elif view_mode == "sim":
@@ -345,12 +331,9 @@ class GraphVisualizer:
         view_mode: str = "1-hop",
         max_nodes: int = 10,
         color_seed: int = 42,
-        undirected: bool = True
+        undirected: bool = True,
+        mask_neighbors: bool = False
     ) -> Tuple[bytes, Dict[str, str]]:
-        """
-        (采用文件1的视觉优化逻辑)
-        包含：边缘稀疏化(只保留重要边)、物理防碰撞布局、中心点/中心边特殊绘制。
-        """
         
         final_nodes = self._select_nodes(center_id, view_mode, max_nodes, undirected)
         final_nodes_set = set(final_nodes)
@@ -358,11 +341,8 @@ class GraphVisualizer:
         G = nx.Graph()
         G.add_nodes_from(final_nodes)
 
-        # ========= Edge Sparsification (文件1特有逻辑) =========
-        # 只保留中心边 + 节点间最重要的 Top-2 相似边，避免连线过于杂乱
+        # ========= Edge Sparsification =========
         edges = set()
-
-        # 1) 中心边：center -> 其在 final_nodes 内的邻居 (全保留)
         center_nbs = set(self._get_neighbors(center_id, undirected))
         for v in final_nodes:
             if v == center_id:
@@ -371,7 +351,6 @@ class GraphVisualizer:
                 a, b = (center_id, v) if center_id < v else (v, center_id)
                 edges.add((a, b))
 
-        # 2) 其他节点：只保留与它们最相似的 2 个邻居 (如果也在图中)
         TOP_K_EDGES = 2
         for u in final_nodes:
             if u == center_id:
@@ -383,7 +362,6 @@ class GraphVisualizer:
                 if v == u or v == center_id:
                     continue
                 if v in final_nodes_set:
-                    # 使用 _get_similarity (这里利用矩阵加速版)
                     score = self._get_similarity(u, v)
                     cand.append((score, v))
 
@@ -394,10 +372,8 @@ class GraphVisualizer:
 
         G.clear_edges()
         G.add_edges_from(list(edges))
-        # ========= End Edge Sparsification =========
-
-        # ========= Connectivity policy (文件1逻辑) =========
-        # 如果是 sim 模式，允许不连通；如果是 hop 模式，尽量保持连通性
+        
+        # ========= Connectivity policy =========
         DISCONNECTED_OK = {"sim", "1-hop+sim", "2-hop+sim"}
 
         if G.number_of_nodes() > 0 and center_id in G:
@@ -406,11 +382,8 @@ class GraphVisualizer:
             keep = {center_id}
 
         if view_mode in DISCONNECTED_OK:
-            # 允许孤立点，只剔除不在 final_nodes 里的边(其实上面构建时已经保证了)
-            # 这里主要是为了只画 "与中心相连" 的边，或者上面稀疏化后的边
             pass
         else:
-            # hop 模式下，如果断开了，做个兜底，变成星型图连回去，防止图太难看
             G = G.subgraph(keep).copy()
             MIN_KEEP_NODES = 3
             if G.number_of_nodes() < MIN_KEEP_NODES:
@@ -425,7 +398,6 @@ class GraphVisualizer:
                 for v in keep_nodes:
                     if v != center_id:
                         G.add_edge(center_id, v)
-        # ========= End connectivity policy =========
 
         nodes_to_draw = list(G.nodes())
         
@@ -438,12 +410,11 @@ class GraphVisualizer:
         sorted_classes = sorted(list(active_classes))
         color_mapping = self._get_color_map_for_episode(sorted_classes, color_seed)
 
-        # ========= Layout Logic (文件1逻辑：防碰撞优化) =========
+        # ========= Layout Logic =========
         pos_init = {}
         pos_init[center_id] = np.array([0.0, 0.0])
         rng = np.random.RandomState(42)
 
-        # 计算所有点到中心的距离 (基于相似度)
         sim_cache = {u: self._get_similarity(center_id, u) for u in nodes_to_draw if u != center_id}
         R_MIN, R_MAX = 0.5, 2.0
 
@@ -458,7 +429,6 @@ class GraphVisualizer:
         k_val = max(0.35, 1.0 / np.sqrt(n)) if n > 0 else 1.0
 
         if view_mode in DISCONNECTED_OK:
-            # sim 模式下使用径向布局，严格反映相似度距离
             pos = {}
             pos[center_id] = np.array([0.0, 0.0], dtype=np.float32)
             golden = 2.399963229728653 
@@ -470,26 +440,15 @@ class GraphVisualizer:
                 theta = (idx + 1) * golden
                 pos[u] = np.array([dist * np.cos(theta), dist * np.sin(theta)], dtype=np.float32)
         else:
-            # 其他模式使用 Spring Layout
-            pos = nx.spring_layout(
-                G,
-                pos=pos_init,
-                seed=42,
-                k=k_val,
-                iterations=80,
-                fixed=[center_id]
-            )
+            pos = nx.spring_layout(G, pos=pos_init, seed=42, k=k_val, iterations=80, fixed=[center_id])
 
-        # 平移归零
         if center_id in pos:
             c_xy = pos[center_id]
             for node in pos:
                 pos[node] = pos[node] - c_xy
 
-        # -----------------------------------------------
-        # 物理防碰撞迭代 (文件1的核心视觉优化)
-        # -----------------------------------------------
-        MIN_R = 0.5 # 中心禁区
+        # 物理防碰撞
+        MIN_R = 0.5 
         for node, xy in pos.items():
             if node == center_id: continue
             r = float(np.linalg.norm(xy))
@@ -512,20 +471,16 @@ class GraphVisualizer:
                     va, vb = pos[a], pos[b]
                     delta = va - vb
                     dist = float(np.linalg.norm(delta))
-
                     if dist < 1e-8:
                         theta = rng.uniform(0, 2 * np.pi)
                         delta = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
                         dist = 1e-4
-
                     if dist < MIN_NODE_DIST:
                         push = (MIN_NODE_DIST - dist) / dist * 0.5
                         shift = delta * push
                         pos[a] = va + shift
                         pos[b] = vb - shift
                         moved = True
-            
-            # 再次强制中心禁区
             for node in nodes_others:
                 xy = pos[node]
                 r = float(np.linalg.norm(xy))
@@ -535,36 +490,40 @@ class GraphVisualizer:
                         xy = np.array([np.cos(theta), np.sin(theta)], dtype=np.float32)
                         r = 1.0
                     pos[node] = xy * (MIN_R / r)
-
-            if not moved:
-                break
-        # -----------------------------------------------
+            if not moved: break
 
         # 准备样式
         edgecolors = []
         sizes = []
         legend_dict = {}
+        COLOR_CENTER = "black"
+        COLOR_MASKED = "black" 
 
         for nid in nodes_to_draw:
             if nid == center_id:
-                edgecolors.append("black")
+                edgecolors.append(COLOR_CENTER)
                 sizes.append(1500)
                 legend_dict["Black"] = "Center Node"
             else:
-                pred_class = self._get_node_info(nid)["pred_class"]
-                c_conf = color_mapping.get(pred_class, {"color": "gray", "name": "Gray"})
-                edgecolors.append(c_conf["color"])
-                sizes.append(800)
-                
-                c_name = c_conf["name"]
-                if c_name not in legend_dict:
-                    legend_dict[c_name] = pred_class
+                if mask_neighbors:
+                    edgecolors.append(COLOR_MASKED)
+                    sizes.append(800)
+                    if "Neighbors (Masked)" not in legend_dict:
+                         legend_dict["Masked Nodes"] = "Unlabeled Neighbors"
+                else:
+                    pred_class = self._get_node_info(nid)["pred_class"]
+                    c_conf = color_mapping.get(pred_class, {"color": "gray", "name": "Gray"})
+                    edgecolors.append(c_conf["color"])
+                    sizes.append(800)
+                    
+                    c_name = c_conf["name"]
+                    if c_name not in legend_dict:
+                        legend_dict[c_name] = pred_class
 
         # 绘图
         fig_size = self.BASE_FIG_SIZE + (len(nodes_to_draw) * 0.02)
         fig = plt.figure(figsize=(fig_size, fig_size))
 
-        # 分开画中心边和其他边 (文件1的视觉优化)
         other_edges = [(u, v) for (u, v) in G.edges() if (u != center_id and v != center_id)]
         nx.draw_networkx_edges(
             G, pos,

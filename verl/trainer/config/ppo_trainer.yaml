@@ -290,6 +290,7 @@ env:
   history_length: 3
   node_text_path: null
   dataset_name: pubmed
+  graph_setting: subgraph_20
   resources_per_worker:
     num_cpus: 2.0 # 加强 CPU 分配，加速视觉/逻辑处理，避免 GPU 5.9% 利用率瓶颈
     num_gpus: 0
