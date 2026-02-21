@@ -1,5 +1,3 @@
-# File 3: agent_system/reward_manager.py
-
 from verl import DataProto
 import torch
 import numpy as np
@@ -14,9 +12,11 @@ class EpisodeRewardManager:
         self.num_examine = num_examine
         self.normalize_by_length = normalize_by_length
         # 预编译正则，提高效率 (宽松匹配：允许标签间有换行或空白)
-        # 这里的 .*? 是非贪婪匹配，re.DOTALL 允许 . 匹配换行符
-        self.format_pattern = re.compile(r"<think>.*?</think>.*<summary>.*?</summary>.*<action>.*?</action>", re.DOTALL | re.IGNORECASE)
-
+        self.format_pattern = re.compile(
+            r"(?:<think>)?.*?</think>.*<summary>.*?</summary>.*<action>.*?</action>", 
+            re.DOTALL | re.IGNORECASE
+        )
+                
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
 
@@ -31,8 +31,8 @@ class EpisodeRewardManager:
 
         already_print_data_sources = {}
         
-        # 定义格式奖励系数 (根据你的奖励尺度调整，这里设为 +/- 0.1)
-        FORMAT_REWARD_COEF = 0.1 
+        # [防刷分机制]：只设定惩罚项，不设正向格式奖励。避免模型长回合刷分。
+        FORMAT_PENALTY_COEF = -0.2 
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -46,8 +46,6 @@ class EpisodeRewardManager:
             valid_response_ids = response_ids[:valid_response_length]
 
             # decode
-            # 修改点：将 valid_prompt_ids 改为 prompt_ids (利用切片获取有效长度)
-            # prompt_ids 在上方已定义
             prompt_str = self.tokenizer.decode(prompt_ids[-valid_prompt_length:], skip_special_tokens=False)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=False)
 
@@ -56,19 +54,20 @@ class EpisodeRewardManager:
             episode_rewards = data_item.non_tensor_batch['episode_rewards']
             episode_lengths = data_item.non_tensor_batch['episode_lengths']
 
+            # --- [核心接入]：优先读取单步事后分配的真实 Reward ---
+            step_reward = data_item.non_tensor_batch.get('step_reward', episode_rewards)
+
             # --- 计算基础分数 ---
             if self.normalize_by_length:
-                score = episode_rewards / episode_lengths
+                score = step_reward / episode_lengths
             else:
-                score = episode_rewards
+                score = step_reward
             
-            # --- [新增] 格式奖励逻辑 ---
-            # 检查 response_str 是否符合格式
-            if self.format_pattern.search(response_str):
-                score += FORMAT_REWARD_COEF
-            else:
-                score -= FORMAT_REWARD_COEF # 惩罚非法格式
-            # -------------------------
+            # --- [优化] 格式防崩塌惩罚逻辑 ---
+            if not self.format_pattern.search(response_str):
+                # 仅对未遵守规范的模型施加惩罚，切断 Reward Hacking 的可能性
+                score += FORMAT_PENALTY_COEF 
+            # ---------------------------------
 
             reward_tensor[i, valid_response_length - 1] = torch.tensor(score, dtype=torch.float32, device=prompt_ids.device)
 

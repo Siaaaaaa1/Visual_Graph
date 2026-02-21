@@ -1,18 +1,13 @@
 import re
 from typing import List, Tuple
 
-_ACTION_BLOCK = re.compile(
-    r"<action>(.*?)</action>",
-    re.IGNORECASE | re.DOTALL
-)
-
+_ACTION_BLOCK = re.compile(r"<action>(.*?)</action>", re.IGNORECASE | re.DOTALL)
 _ACTION_TAG = re.compile(r"<action>", re.IGNORECASE)
 
 _CHECK_NODE_RE = re.compile(r"^check_node:(\d+)$")
 _CHECK_NODES_RE = re.compile(r"^check_nodes:\[(.*?)\]$")
-
-# 允许 view_mode 包含字母、数字、连字符和加号 (例如: 1-hop+sim)
 _CHECK_GRAPH_RE = re.compile(r"^check_graph:(.+?)$") 
+_PAINT_RE = re.compile(r"^paint:(\d+),\s*(.+)$") # NEW: Paint logic
 
 MAX_NODES_PER_STEP = 5
 VALID_VIEW_MODES = {"1-hop", "2-hop", "sim", "1-hop+sim", "2-hop+sim"}
@@ -22,7 +17,6 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
     valids: List[int] = [1] * len(actions)
 
     for i, raw in enumerate(actions):
-        # 1. 唯一性检查
         if len(_ACTION_TAG.findall(raw)) != 1:
             results.append("")
             valids[i] = 0
@@ -36,74 +30,50 @@ def graph_search_projection(actions: List[str]) -> Tuple[List[str], List[int]]:
 
         action = m.group(1).strip()
 
-        # 2. check_node:<id>
         if _CHECK_NODE_RE.match(action):
             results.append(action)
             continue
 
-        # 3. check_nodes:[id1, id2]
         m_multi = _CHECK_NODES_RE.match(action)
         if m_multi:
             content = m_multi.group(1).strip()
             if not content:
-                results.append("")
-                valids[i] = 0
-                continue
+                results.append(""); valids[i] = 0; continue
             try:
-                # 允许空格
                 node_ids = [int(x.strip()) for x in content.split(",") if x.strip()]
                 if 0 < len(node_ids) <= MAX_NODES_PER_STEP:
                     results.append(action)
                     continue
-            except ValueError:
-                pass
-            results.append("")
-            valids[i] = 0
-            continue
+            except ValueError: pass
+            results.append(""); valids[i] = 0; continue
 
-        # 4. check_graph:<view_mode>,<max_nodes>
-        # 优化点 4: 增加鲁棒性处理
         if action.startswith("check_graph:"):
             try:
-                # 预处理：去掉前缀，处理中文逗号，处理多余空格
-                content = action[len("check_graph:"):].strip()
-                content = content.replace("，", ",")
-                
+                content = action[len("check_graph:"):].strip().replace("，", ",")
                 params = content.split(",")
-
-                # 必须正好 2 个参数
-                if len(params) != 2:
-                    raise ValueError
-
+                if len(params) != 2: raise ValueError
                 view_mode = params[0].strip()
-                max_nodes_str = params[1].strip()
-                
-                # 提取纯数字，防止出现 "20 nodes" 这种情况
-                num_match = re.search(r"\d+", max_nodes_str)
-                if not num_match:
-                     raise ValueError
+                num_match = re.search(r"\d+", params[1].strip())
+                if not num_match: raise ValueError
                 max_nodes = int(num_match.group(0))
-
-                if view_mode not in VALID_VIEW_MODES:
-                    raise ValueError
-                if max_nodes <= 0:
-                    raise ValueError
-                
-                # 重新构造成标准格式返回
-                clean_action = f"check_graph:{view_mode},{max_nodes}"
-                results.append(clean_action)
+                if view_mode not in VALID_VIEW_MODES or max_nodes <= 0: raise ValueError
+                results.append(f"check_graph:{view_mode},{max_nodes}")
                 continue
             except:
-                results.append("")
-                valids[i] = 0
-                continue
+                results.append(""); valids[i] = 0; continue
 
-        # 5. final:<category>
-        if action.startswith("final:"):
+        # NEW: Parse paint action
+        m_paint = _PAINT_RE.match(action)
+        if m_paint:
+            nid = m_paint.group(1).strip()
+            cls = m_paint.group(2).strip()
+            results.append(f"paint:{nid},{cls}")
+            continue
+
+        if action.startswith("final:") or action.startswith("submit:"):
             results.append(action)
             continue
 
-        # 非法
         results.append("")
         valids[i] = 0
 

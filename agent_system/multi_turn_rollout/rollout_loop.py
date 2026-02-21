@@ -262,6 +262,11 @@ class TrajectoryCollector:
                     data['episode_rewards'] = episode_rewards[bs]
                     data['episode_lengths'] = episode_lengths[bs]
                     data['tool_callings'] = tool_callings[bs]
+                    
+                    # [Ada-Fog 核心增强]：确保事后单步奖励 (step_reward) 被安全继承
+                    if 'step_reward' not in data:
+                        data['step_reward'] = float(data.get('rewards', 0.0))
+                        
                     for key, value in success_rate.items():
                         data[key] = value
 
@@ -286,7 +291,6 @@ class TrajectoryCollector:
 
         env_kwargs = gen_batch.non_tensor_batch.get('env_kwargs', None)
         
-        # 依然保留防御性逻辑，防止数据源本身就没有这个 key
         if env_kwargs is None:
              env_kwargs = [{}] * batch_size
              
@@ -327,7 +331,6 @@ class TrajectoryCollector:
             truncation_flags = batch.non_tensor_batch.get('is_truncated', [False] * batch_size)
             truncated_texts = batch.non_tensor_batch.get('truncated_text', [""] * batch_size)
             
-            # 获取 image_inputs (这是一个 batch 数组，每个元素是一个 dict)
             image_inputs = batch.non_tensor_batch.get('multi_modal_inputs', None)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -358,8 +361,6 @@ class TrajectoryCollector:
             batch = batch.union(batch_output)
             
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
-            
-            # 将模型的原始文本响应写入 Batch
             batch.non_tensor_batch['model_response_text'] = np.array(text_actions, dtype=object)
 
             # --- Env Interaction ---
@@ -380,15 +381,10 @@ class TrajectoryCollector:
                 valid_input_len = batch_input.batch['attention_mask'][i].sum().item()
                 img_info = "No Image"
                 
-                # --- [修正逻辑 Start] ---
-                # 1. 显式检查 is not None，避免 numpy array 的 truth value ambiguous 错误
                 if image_inputs is not None:
-                    # 2. image_inputs 是一个 Object Array，先用 [i] 取出当前样本的字典
                     sample_inputs = image_inputs[i]
-                    
                     if isinstance(sample_inputs, dict):
                         if 'image_grid_thw' in sample_inputs:
-                             # 3. 直接访问字典内的值，不需要再加 [i]
                              grid = sample_inputs['image_grid_thw']
                              img_shape = grid.tolist() if hasattr(grid, 'tolist') else str(grid)
                              img_info = f"Grid Shape: {img_shape}"
@@ -398,10 +394,8 @@ class TrajectoryCollector:
                                  img_info = f"Pixel Values: {len(pv)} images"
                              else:
                                  img_info = f"Pixel Values Shape: {pv.shape}"
-                # --- [修正逻辑 End] ---
                 
                 print(f"[Input Stats] Text Len: {valid_input_len} | Image Info: {img_info}")
-
                 print(f"[Input Prompt] (Start): {input_prompts[i][:200]} ...")
                 print(f"[Input Prompt] (End): ... {input_prompts[i][-500:]}")
                 
@@ -446,7 +440,6 @@ class TrajectoryCollector:
             if len(dones.shape) == 2:
                 dones = dones.squeeze(1)
 
-            # 将解析后的结构化数据 (Think/Summary/Action) 写入 Batch
             if infos:
                 batch.non_tensor_batch['parsed_think'] = np.array([info.get('parsed_think', '') for info in infos], dtype=object)
                 batch.non_tensor_batch['parsed_summary'] = np.array([info.get('parsed_summary', '') for info in infos], dtype=object)
@@ -468,11 +461,26 @@ class TrajectoryCollector:
             
             batch_list: list[dict] = to_list_of_dict(batch)
 
+            # --- 保存每一步的基础状态 ---
             for i in range(batch_size):
+                batch_list[i]['step_reward'] = float(rewards[i] if np.isscalar(rewards[i]) else rewards[i].item())
                 total_batch_list[i].append(batch_list[i])
                 total_infos[i].append(infos[i])
 
+            # --- [核心更新]: 捕获终局信号，执行事后信用分配 ---
+            is_done_prev = is_done.copy()
             is_done = np.logical_or(is_done, dones)
+            
+            just_finished = np.logical_and(is_done, np.logical_not(is_done_prev))
+            for i in range(batch_size):
+                if just_finished[i] and infos and len(infos) > i and 'hindsight_rewards' in infos[i]:
+                    hr = infos[i]['hindsight_rewards']
+                    valid_steps = [step for step in total_batch_list[i] if step['active_masks']]
+                    for step_idx, step_dict in enumerate(valid_steps):
+                        if step_idx < len(hr):
+                            step_dict['step_reward'] = float(hr[step_idx])
+            # --------------------------------------------------
+
             obs = next_obs
 
             if is_done.all():
@@ -486,6 +494,7 @@ class TrajectoryCollector:
                     )
         
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+  
             
     def dynamic_multi_turn_loop(
             self,
@@ -541,6 +550,63 @@ class TrajectoryCollector:
 
         return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
 
+    # ==========================================================
+    # [NEW] GRPO Advantage Analytics Logger
+    # ==========================================================
+    def compute_and_log_grpo_advantages(self, rewards: torch.Tensor, env_modes: list, group_size: int):
+        if rewards.dim() == 1:
+            if rewards.shape[0] % group_size != 0:
+                print(f"[Warning] Total rewards length {rewards.shape[0]} is not divisible by group_size {group_size}. Skipping GRPO Analytics.")
+                return None
+            rewards_2d = rewards.view(-1, group_size)
+        else:
+            rewards_2d = rewards
+
+        batch_size = rewards_2d.shape[0]
+        
+        # 1. 计算 GRPO 组内均值与标准差
+        group_mean = rewards_2d.mean(dim=-1, keepdim=True)
+        group_std = rewards_2d.std(dim=-1, keepdim=True)
+        
+        # 2. 计算 Advantage (标准归一化，方差过小置 0)
+        advantages = torch.where(
+            group_std > 1e-6,
+            (rewards_2d - group_mean) / (group_std + 1e-8),
+            torch.zeros_like(rewards_2d)
+        )
+
+        # 3. 统计核心指标
+        dead_groups = (group_std.squeeze(-1) <= 1e-6).sum().item()
+        vanishing_ratio = dead_groups / batch_size if batch_size > 0 else 0
+
+        sys1_count = env_modes.count("System1")
+        total_envs = len(env_modes)
+        sys1_ratio = sys1_count / total_envs if total_envs > 0 else 0
+
+        print("\n" + "="*50)
+        print("🎯 [GRPO Advantage & Reward Analytics]")
+        print(f"🔹 Total Prompt Groups (Batches): {batch_size} | Group Size (G): {group_size}")
+        print(f"🔹 Sys1/Sys2 Ratio: {sys1_ratio:.1%} / {1 - sys1_ratio:.1%}")
+        print(f"🔹 Vanishing Ratio: {vanishing_ratio:.1%} ({dead_groups}/{batch_size} zero-variance groups)")
+        print("-" * 50)
+        
+        show_batches = min(6, batch_size) # 打印前 6 个组的细节以供观测
+        
+        for i in range(show_batches):
+            r_group = rewards_2d[i].cpu().numpy()
+            a_group = advantages[i].cpu().numpy()
+            mode_idx = i * group_size
+            mode = env_modes[mode_idx] if mode_idx < len(env_modes) else "Unknown"
+            
+            print(f"📦 [Prompt Group {i} | Mode: {mode}]")
+            print(f"   Rewards:    [{', '.join([f'{x:5.2f}' for x in r_group])}] (Mean: {group_mean[i].item():.2f}, Std: {group_std[i].item():.2f})")
+            print(f"   Advantages: [{', '.join([f'{x:5.2f}' for x in a_group])}]")
+            if group_std[i].item() <= 1e-6:
+                print("   ⚠️ WARNING: Zero Variance! Advantages collapsed to 0.")
+            print("-" * 50)
+        
+        return advantages
+
     def multi_turn_loop(
             self,
             gen_batch: DataProto, 
@@ -562,6 +628,29 @@ class TrajectoryCollector:
                 self.vanilla_multi_turn_loop(gen_batch=gen_batch, actor_rollout_wg=actor_rollout_wg, envs=envs)
         
         assert len(total_batch_list) == len(total_episode_rewards)
+
+        # =========================================================
+        # [NEW] GRPO Advantage Logger Intersection
+        # =========================================================
+        try:
+            group_size = self.config.env.rollout.n
+            if group_size > 1 and is_train:
+                env_modes = []
+                for i in range(len(total_batch_list)):
+                    mode = "Unknown"
+                    if len(total_batch_list[i]) > 0:
+                        prompt_text = total_batch_list[i][0].get('final_prompt_text', '')
+                        if "CLEAR WEATHER" in prompt_text:
+                            mode = "System1"
+                        elif "FOG OF WAR" in prompt_text:
+                            mode = "System2"
+                    env_modes.append(mode)
+                
+                rewards_tensor = torch.tensor(total_episode_rewards, dtype=torch.float32)
+                self.compute_and_log_grpo_advantages(rewards_tensor, env_modes, group_size)
+        except Exception as e:
+            print(f"[Warning] Failed to compute and log GRPO advantages: {e}")
+        # =========================================================
 
         # Create trajectory data
         gen_batch_output: DataProto = self.gather_rollout_data(

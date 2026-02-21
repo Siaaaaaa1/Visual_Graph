@@ -4,8 +4,11 @@ export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=FLASHINFER
 export VERL_PPO_ASYNC_ROLLOUT=1 
 
+# [删除] 这一行会导致 vLLM 启动崩溃，必须删掉
+# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 export WANDB_API_KEY="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"
-export MASTER_ADDRESS=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
+export MASTER_ADDRESS=127.0.0.1
 export WORLD_SIZE=8
 
 ENGINE=${1:-vllm}
@@ -15,11 +18,14 @@ num_cpus_per_env_worker=1.0
 train_data_size=32
 val_data_size=256
 group_size=8
-MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
+MODEL_PATH="./models/Qwen3-VL-4B-Thinking"
 
 ppo_mini_batch_size=1024
-# 保持为 4，关闭 remove_padding 后显存压力变大，4 是 H20 的安全水位
+# 保持为 2，这是训练时的 batch
 micro_batch_size=2
+
+# [保留] 这是解决 OOM 的关键：将推理 log_prob 阶段的 batch 从 8 降为 2
+log_prob_batch_size=2
 
 # --- 2. 脚本信息获取 ---
 SCRIPT_NAME=$(basename "$0" .sh)
@@ -60,8 +66,8 @@ python3 -m verl.trainer.main_ppo \
     data.val_files=$VAL_FILE \
     data.train_batch_size=$train_data_size \
     data.val_batch_size=$val_data_size \
-    data.max_prompt_length=5120 \
-    data.max_response_length=2048 \
+    data.max_prompt_length=8192 \
+    data.max_response_length=4096 \
     data.filter_overlong_prompts=True \
     data.truncation='right' \
     data.return_raw_chat=True \
@@ -71,25 +77,25 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.use_fused_kernels=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$micro_batch_size \
-    actor_rollout_ref.actor.entropy_coeff=0.0005 \
+    actor_rollout_ref.actor.entropy_coeff=0.0 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$log_prob_batch_size \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
-    actor_rollout_ref.rollout.max_model_len=8192 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
-    actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
+    actor_rollout_ref.rollout.max_model_len=12288 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=12288 \
+    actor_rollout_ref.rollout.gpu_memory_utilization=0.4 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.enforce_eager=False \
+    actor_rollout_ref.rollout.enforce_eager=True \
     actor_rollout_ref.rollout.free_cache_engine=False \
-    actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=$log_prob_batch_size \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
@@ -109,7 +115,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
     trainer.test_freq=10 \
-    trainer.total_epochs=10 \
+    trainer.total_epochs=50 \
     trainer.val_before_train=false \
     ray_init.num_cpus=64 \
+    trainer.resume_mode=disable \
     actor_rollout_ref.rollout.dtype=bfloat16 2>&1 | tee >(sed -u -E 's/\x1b\[[0-9;]*m//g; s/\((WorkerDict|TaskRunner) pid=[0-9]*\)//g' > "$LOG_FILE")
