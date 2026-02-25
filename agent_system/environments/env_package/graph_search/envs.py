@@ -272,7 +272,8 @@ class GraphSearchEnv:
 
         if not current_action or self.done:
             img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024,1024,3), dtype=np.uint8)
-            return ("Invalid format" if not self.done else ""), img_ret, -0.01 if not self.done else 0.0, self.done, {
+            # 格式完全错误，惩罚统一调整为 -0.1
+            return ("Invalid format" if not self.done else ""), img_ret, -0.1 if not self.done else 0.0, self.done, {
                 "parsed_action": "ERROR", 
                 "won": False, 
                 "step": self.step_count
@@ -281,7 +282,7 @@ class GraphSearchEnv:
         if current_action.startswith("check_node:") or current_action.startswith("check_nodes:"):
             if self.mode == "System1":
                 obs = "System 1 Violation: You are not allowed to explore in Clear Weather. Directly submit the answer."
-                reward = -0.01 
+                reward = -0.1 
             else:
                 try:
                     node_ids = [int(p) for p in re.findall(r"\d+", current_action)]
@@ -290,14 +291,16 @@ class GraphSearchEnv:
                         self.seen_nodes.add(node_id)
                         texts.append(f"Node {node_id} Text:\n{self.node_text_db.get(str(node_id), 'No text available.')[:400]}")
                     obs = "\n\n".join(texts)
+                    # 探索动作无冗余步数惩罚
+                    reward = 0.0 
                 except Exception:
                     obs = "Error parsing check_node ids."
-                    reward = -0.01
+                    reward = -0.1
 
         elif current_action.startswith("paint:"):
             if self.mode == "System1":
                 obs = "System 1 Violation: Paint is disabled in Clear Weather."
-                reward = -0.01
+                reward = -0.1
             else:
                 try:
                     parts = current_action.split(":", 1)[1].split(",", 1)
@@ -307,11 +310,15 @@ class GraphSearchEnv:
                         self.painted_nodes[nid] = cls
                         obs = f"[DELAYED FEEDBACK] Node {nid} painted as '{cls}'. Map updated. Correctness hidden."
                         
-                        # 取消猜测错误触发的惩罚逻辑，只要标记操作合规均给正向基础反馈
-                        reward = 0.02
+                        gt_cls = self.visualizer._get_node_info(nid)["true_class"]
+                        # 【核心修正】：正确涂色给奖励，错误涂色给惩罚
+                        if cls.lower() == gt_cls.lower():
+                            reward = 0.1
+                        else:
+                            reward = -0.1
                     else:
                         obs = f"[INVALID] Node {nid} is already painted. Prevent Farming constraint triggered."
-                        reward = -0.01 
+                        reward = -0.1 
                     
                     img_bytes, legend_dict = self.visualizer.draw_subgraph(
                         self.center_id, view_mode="2-hop+sim", max_nodes=30, 
@@ -322,12 +329,12 @@ class GraphSearchEnv:
                     obs += f"\nLegend: {self._format_legend(legend_dict)}"
                 except Exception:
                     obs = "Invalid paint format. Use paint:ID,Category"
-                    reward = -0.01
+                    reward = -0.1
 
         elif current_action.startswith("check_graph:"):
             if self.mode == "System1":
                 obs = "System 1 Violation: Graph manipulation disabled. Submit directly."
-                reward = -0.01
+                reward = -0.1
             else:
                 try:
                     params = current_action.split(":", 1)[1].strip().split(",")
@@ -339,9 +346,11 @@ class GraphSearchEnv:
                     )
                     self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024)))
                     obs = f"Graph view updated. Legend: {self._format_legend(legend_dict)}"
+                    # 探索动作无冗余步数惩罚
+                    reward = 0.0
                 except Exception:
                     obs = "Invalid check_graph format."
-                    reward = -0.01
+                    reward = -0.1
 
         elif current_action.startswith("final:") or current_action.startswith("submit:"):
             try:
@@ -351,7 +360,8 @@ class GraphSearchEnv:
                 if self.mode == "System1":
                     done = True
                     self.done = True
-                    reward = 1.0 if is_correct else -0.5
+                    # 【对称奖励】对则 +1.0，错则 -1.0
+                    reward = 1.0 if is_correct else -1.0
                     obs = "System 1 Final answer submitted."
                 else:
                     # 解除硬性字符串匹配，只要该节点存在被提交 paint 操作即满足条件
@@ -372,11 +382,13 @@ class GraphSearchEnv:
                             reward = 1.0 
                             obs = f"Gate UNLOCKED. Final answer CORRECT!"
                         else:
-                            reward = -0.5
+                            # 【对称奖励】错则 -1.0
+                            reward = -1.0
                             obs = f"Gate UNLOCKED. Final answer WRONG."
                     else:
                         done = False
-                        reward = -0.01 
+                        # 强行提交门没开的逻辑扣分
+                        reward = -0.1 
                         missing_classes = self.required_classes - painted_tcs
                         if len(self.required_classes) == 0:
                             missing_str = "ANY 1 correct node"
@@ -386,15 +398,16 @@ class GraphSearchEnv:
                         obs = f"Action Failed: Logic Gate Locked. You still need to paint at least ONE node from: [{missing_str}]."
             except Exception:
                 obs = "Invalid submit format."
-                reward = -0.01
+                reward = -0.1
         else:
             obs = f"Invalid action command."
-            reward = -0.01
+            reward = -0.1
 
+        # 【对称超时惩罚】：达到 max_steps 直接给予最高惩罚
         if not done and self.step_count >= self.max_steps:
             done = True
             self.done = True
-            reward = -0.5
+            reward = -1.0
 
         info = {
             "step": self.step_count,
