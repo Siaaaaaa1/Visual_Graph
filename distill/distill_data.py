@@ -36,6 +36,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# 使用 8080 端口
 API_URL = "http://localhost:8080/v1/chat/completions"
 MAX_CONCURRENT_REQUESTS = 128  # 压榨 GPU 的核心并发数控制
 MAX_RETRIES = 10               # 10次未成功则丢弃
@@ -50,9 +51,23 @@ def ndarray_to_bytes(img_array: np.ndarray) -> bytes:
 def img_to_b64(img_array):
     return base64.b64encode(ndarray_to_bytes(img_array)).decode("utf-8")
 
-# ================= 数据预加载 =================
+# ================= 数据预加载与测试集过滤 =================
 def prepare_shared_assets(dataset_name, dataset_dir):
     logger.info(f"预加载数据集资产: {dataset_name}")
+    
+    # 0. 先加载测试集屏蔽列表（防止数据泄露）
+    test_parquet_path = os.path.join(dataset_dir, f"{dataset_name}_test_slim.parquet")
+    test_ids = set()
+    if os.path.exists(test_parquet_path):
+        test_df = pd.read_parquet(test_parquet_path)
+        if 'center_id' in test_df.columns:
+            # 转换为整型集合，便于快速比对
+            test_ids = set(test_df['center_id'].astype(int).tolist())
+        logger.info(f"🛡️ 成功加载测试集名单，共计 {len(test_ids)} 个测试节点将在蒸馏中被强行过滤！")
+    else:
+        logger.warning(f"⚠️ 未找到测试集文件 {test_parquet_path}，无法执行测试集屏蔽！")
+
+    # 1. 提取任务并过滤
     json_path = os.path.join(dataset_dir, f"{dataset_name}.json")
     with open(json_path, 'r', encoding='utf-8') as f:
         raw = json.load(f)
@@ -60,15 +75,25 @@ def prepare_shared_assets(dataset_name, dataset_dir):
     all_tasks = []
     for node in raw.get("nodes", []):
         nid = int(node["id"])
+        
+        # 【核心拦截】：如果在测试集中，直接跳过，绝不能用于生成训练轨迹
+        if nid in test_ids:
+            continue
+            
         ans = node.get("label") or node.get("proxy_info", {}).get("top1") or "Unknown"
         all_tasks.append({"center_id": nid, "answer": ans})
+        
+    logger.info(f"✅ 过滤后剩余可用节点数 (非Test集): {len(all_tasks)}")
     
-    text_path = os.path.join(dataset_dir, f"make_{dataset_name}_text.json")
+    # 2. 预加载文本库
+    text_path = os.path.join(dataset_dir, f"{dataset_name}_text.json")
     if not os.path.exists(text_path):
-        text_path = os.path.join(dataset_dir, "node_text_db.json")
+        raise FileNotFoundError(f"找不到节点文本文件：{text_path}")
+        
     with open(text_path, 'r', encoding='utf-8') as f:
         text_db = json.load(f)
 
+    # 3. 构建共享 Payload 避免内存崩溃
     g_data, r_adj, c_map = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)
     temp_viz = GraphVisualizer(dataset_name=dataset_name, dataset_dir=dataset_dir, shared_data=(g_data, r_adj, c_map, None))
     shared_payload = (g_data, r_adj, c_map, temp_viz.feat_matrix)
@@ -95,16 +120,13 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
     successful_trajectories = []
     loop = asyncio.get_running_loop()
     
-    # 针对需要多条轨迹的要求进行循环
     for needed_idx in range(args.target_successes):
         success = False
         
         for attempt in range(MAX_RETRIES):
-            # 10 次内动态调温：0.6 -> 0.96
             current_temp = min(0.6 + (attempt * 0.04), 1.0)
             tau_val = random.choice([0.2, 0.4, 0.6])
             
-            # 使用后台线程池执行 CPU 密集型的环境初始化
             env = await loop.run_in_executor(
                 executor, 
                 lambda: GraphSearchEnv(
@@ -154,7 +176,6 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
             if api_error:
                 continue
 
-            # 质量门控校验
             is_valid = True
             if final_reward < 1.0 or step_count > 8: is_valid = False
             if info["mode"] == "System2" and process_rewards <= 0: is_valid = False
@@ -164,14 +185,12 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
                     "task_id": tid, "mode": info["mode"], "steps": step_count, "traj": raw_traj
                 })
                 success = True
-                break  # 成功拿到当前要求的轨迹，跳出重试循环，进入下一条收集
+                break
                 
-        # 如果 10 次尝试都未能拿到这一条轨迹，放弃该任务的后续收集
         if not success:
             logger.warning(f"Task {tid} 连续 {MAX_RETRIES} 次尝试失败，放弃该样本。")
             break
 
-    # 只有当收集到的成功轨迹数量严格满足要求时，才认为该任务完全成功
     if len(successful_trajectories) == args.target_successes:
         return successful_trajectories
     return None
@@ -180,26 +199,23 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
 async def main_async():
     all_tasks, text_db, shared_payload = prepare_shared_assets(args.dataset, args.dataset_dir)
     random.shuffle(all_tasks)
+    # 取全部有效的非测试集节点任务，上限可控
     tasks = all_tasks[:args.num_tasks]
     
     results = []
     training_data = []
     
-    # 控制并发量：限制 aiohttp 连接池大小与并发信号量
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
     sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     
-    # 建立单独的后台线程池供环境图片渲染使用
     executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS)
     
     async with aiohttp.ClientSession(connector=connector) as session:
-        # 创建所有任务的协程
         tasks_coroutines = [
             run_task_async(t, text_db, shared_payload, session, sem, executor) 
             for t in tasks
         ]
         
-        # 使用 tqdm.asyncio 展现并发进度条
         for coro in tqdm.as_completed(tasks_coroutines, total=len(tasks), desc=f"蒸馏 {args.dataset} (目标:{args.target_successes}条/样本)"):
             trajectories = await coro
             if trajectories:
