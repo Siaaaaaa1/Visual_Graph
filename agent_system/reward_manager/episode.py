@@ -31,7 +31,7 @@ class EpisodeRewardManager:
 
         already_print_data_sources = {}
         
-        # [防刷分机制]：只设定惩罚项，不设正向格式奖励。避免模型长回合刷分。
+        # [防刷分机制]：只设定惩罚项，不设正向格式奖励。
         FORMAT_PENALTY_COEF = -0.2 
 
         for i in range(len(data)):
@@ -51,22 +51,29 @@ class EpisodeRewardManager:
 
             data_source = data_item.non_tensor_batch['data_source']
 
-            episode_rewards = data_item.non_tensor_batch['episode_rewards']
-            episode_lengths = data_item.non_tensor_batch['episode_lengths']
-
-            # --- [核心接入]：优先读取单步事后分配的真实 Reward ---
-            step_reward = data_item.non_tensor_batch.get('step_reward', episode_rewards)
-
-            # --- 计算基础分数 ---
-            if self.normalize_by_length:
-                score = step_reward / episode_lengths
-            else:
-                score = step_reward
+            # --- [核心修改]：绝对过滤逻辑执行 ---
+            # 检查来自 rollout_loop.py 的绝对过滤标记
+            is_filtered = data_item.non_tensor_batch.get('is_filtered', False)
             
-            # --- [优化] 格式防崩塌惩罚逻辑 ---
-            if not self.format_pattern.search(response_str):
-                # 仅对未遵守规范的模型施加惩罚，切断 Reward Hacking 的可能性
-                score += FORMAT_PENALTY_COEF 
+            if is_filtered:
+                # 如果被过滤，强制设为 0，不进行任何奖励或惩罚计算
+                score = 0.0
+            else:
+                episode_rewards = data_item.non_tensor_batch['episode_rewards']
+                episode_lengths = data_item.non_tensor_batch['episode_lengths']
+
+                # 优先读取单步事后分配的真实 Reward
+                step_reward = data_item.non_tensor_batch.get('step_reward', episode_rewards)
+
+                # 计算基础分数
+                if self.normalize_by_length:
+                    score = step_reward / episode_lengths
+                else:
+                    score = step_reward
+                
+                # 只有非过滤样本才进行格式校验和惩罚
+                if not self.format_pattern.search(response_str):
+                    score += FORMAT_PENALTY_COEF 
             # ---------------------------------
 
             reward_tensor[i, valid_response_length - 1] = torch.tensor(score, dtype=torch.float32, device=prompt_ids.device)

@@ -630,6 +630,32 @@ class TrajectoryCollector:
         assert len(total_batch_list) == len(total_episode_rewards)
 
         # =========================================================
+        # [NEW] Absolute Filtering Logic (绝对过滤逻辑)
+        # =========================================================
+        group_size = self.config.env.rollout.n
+        if is_train and group_size > 1:
+            # total_success['success_rate'] 存储了每条轨迹的 won (0 或 1)
+            outcomes = np.array(total_success.get('success_rate', []))
+            
+            if len(outcomes) == len(total_episode_rewards):
+                for i in range(0, len(outcomes), group_size):
+                    group_slice = outcomes[i : i + group_size]
+                    
+                    # 判断该组是否全败 (all 0) 或全胜 (all 1)
+                    if np.all(group_slice == 0) or np.all(group_slice == 1):
+                        # 1. 抹平总轨迹奖励，使得该组在日志计算中的 std 为 0
+                        total_episode_rewards[i : i + group_size] = 0.0
+                        
+                        # 2. 遍历组内轨迹，抹平单步奖励并打上绝对过滤标签
+                        for j in range(i, i + group_size):
+                            for step_data in total_batch_list[j]:
+                                # 抹除单步奖励，防止中间奖励产生方差
+                                step_data['step_reward'] = 0.0
+                                # 注入关键标记，供 episode.py 识别以跳过格式奖励
+                                step_data['is_filtered'] = True 
+        # =========================================================
+
+        # =========================================================
         # [NEW] GRPO Advantage Logger Intersection
         # =========================================================
         try:
@@ -662,10 +688,9 @@ class TrajectoryCollector:
             tool_callings=totoal_tool_callings,
         )
         
-        # --- 优化后的保存逻辑 Start ---
+        # --- 优化后的保存逻辑 ---
         REMOVE_KEYS = ['pixel_values', 'image_grid_thw'] 
         PARENT_KEY = 'multi_modal_inputs' 
-        # 指定需要排到最后的字段列表
         END_KEYS = ['model_response_text', 'anchor_obs', 'final_prompt_text', 'raw_prompt', 'parsed_think']
 
         def make_serializable(obj):
@@ -694,55 +719,36 @@ class TrajectoryCollector:
         if non_tensor_data:
             all_keys = list(non_tensor_data.keys())
             batch_size = len(non_tensor_data[all_keys[0]])
-
-            # 1. 筛选出中间字段：排除掉 index 和 需要放到最后的 END_KEYS
-            # 注意：step_in_traj 是我们在循环中生成的，不属于原始 key
             middle_keys = [k for k in all_keys if k != 'index' and k not in END_KEYS]
-            
-            # 2. 筛选出数据中实际存在的 END_KEYS (防止硬编码的 key 不存在报错)
             valid_end_keys = [k for k in END_KEYS if k in all_keys]
 
-            # 用于计算 step_in_traj 的状态变量
             last_traj_uid = None
             step_counter = 0
 
             with open(output_file, 'a', encoding='utf-8') as f:
                 for i in range(batch_size):
-                    row = {} # Python 3.7+ 字典保证插入顺序
-
-                    # --- A. 头部字段: index ---
+                    row = {}
                     if 'index' in non_tensor_data:
                         row['index'] = make_serializable(non_tensor_data['index'][i])
                     
-                    # --- B. 头部字段: step_in_traj (轨迹内序号) ---
-                    # 获取当前样本的 traj_uid
                     current_traj_uid = str(non_tensor_data['traj_uid'][i]) if 'traj_uid' in non_tensor_data else "unknown"
-                    
-                    # 如果 traj_uid 变了，说明是新的一条轨迹，重置计数器
-                    # (gather_rollout_data 保证了同一轨迹的数据是连续的)
                     if last_traj_uid != current_traj_uid:
                         step_counter = 0
                         last_traj_uid = current_traj_uid
                     else:
                         step_counter += 1
-                    
                     row['step_in_traj'] = step_counter
 
-                    # --- C. 中间字段 (动态处理，包含 action 等任意字段) ---
                     for key in middle_keys:
                         raw_val = non_tensor_data[key][i]
-                        # 特殊清理逻辑：清理 multi_modal_inputs
                         if key == PARENT_KEY and isinstance(raw_val, dict):
                             raw_val = {k: v for k, v in raw_val.items() if k not in REMOVE_KEYS}
-                        
                         row[key] = make_serializable(raw_val)
                     
-                    # --- D. 尾部字段 (大文本) ---
                     for key in valid_end_keys:
                         raw_val = non_tensor_data[key][i]
                         row[key] = make_serializable(raw_val)
 
                     f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
-        # --- 优化后的保存逻辑 End ---
         
         return gen_batch_output
