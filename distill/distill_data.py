@@ -16,10 +16,8 @@ import re
 import random
 
 # ================= 路径动态挂载 =================
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-# 动态将 env_package 添加到环境变量，确保 graph_search 作为包被正确识别
-ENV_PKG_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '../agent_system/environments/env_package'))
-sys.path.append(ENV_PKG_DIR)
+# 因为在 verl-agent 根目录下运行，直接使用相对路径添加包
+sys.path.append("agent_system/environments/env_package")
 
 # 导入环境组件
 from graph_search.envs import GraphSearchEnv
@@ -29,18 +27,18 @@ from graph_search.graph_visualizer import GraphVisualizer
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str, required=True, choices=["cora", "pubmed", "arxiv"])
 parser.add_argument("--num_tasks", type=int, default=200)
-parser.add_argument("--dataset_dir", type=str, default="./datasets")
+parser.add_argument("--dataset_dir", type=str, default="datasets")
 args = parser.parse_args()
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    # 确保日志严格保存在 distill 目录下
-    handlers=[logging.FileHandler(os.path.join(CURRENT_DIR, f"distill_{args.dataset}.log"), mode='w')]
+    # 将日志强制写入 distill 目录
+    handlers=[logging.FileHandler(f"distill/distill_{args.dataset}.log", mode='w')]
 )
 logger = logging.getLogger(__name__)
 
-client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+client = OpenAI(api_key="EMPTY", base_url="http://localhost:8080/v1")
 
 # ================= 辅助函数 =================
 def ndarray_to_bytes(img_array: np.ndarray) -> bytes:
@@ -68,7 +66,7 @@ def prepare_shared_assets(dataset_name, dataset_dir):
         ans = node.get("label") or node.get("proxy_info", {}).get("top1") or "Unknown"
         all_tasks.append({"center_id": nid, "answer": ans})
     
-    # 2. 预加载文本库 (根据 make_{ds}_text.py 的产出格式)
+    # 2. 预加载文本库
     text_path = os.path.join(dataset_dir, f"make_{dataset_name}_text.json")
     if not os.path.exists(text_path):
         text_path = os.path.join(dataset_dir, "node_text_db.json") # Fallback
@@ -114,7 +112,6 @@ def run_episode(task, text_db, shared_payload):
             img_bytes = None
 
         msgs.append({"role": "user", "content": user_content})
-        # Parquet 存二进制节省空间
         raw_traj.append({"role": "user", "content": [{"type": "text", "text": obs_text}, {"type": "image", "bytes": img_bytes}]})
         
         try:
@@ -168,12 +165,12 @@ def main():
     
     # 强制落盘到 distill 目录
     if training_data:
-        parquet_path = os.path.join(CURRENT_DIR, f"{args.dataset}_training.parquet")
-        stats_path = os.path.join(CURRENT_DIR, f"{args.dataset}_stats.json")
+        parquet_path = f"distill/{args.dataset}_training.parquet"
+        stats_path = f"distill/{args.dataset}_stats.json"
         pd.DataFrame(training_data).to_parquet(parquet_path)
         with open(stats_path, 'w') as f:
             json.dump(results, f, indent=2)
-        print(f"\n[SUCCESS] {args.dataset} 完成! 样本数: {len(training_data)} (保存于 {CURRENT_DIR})")
+        print(f"\n[SUCCESS] {args.dataset} 完成! 样本数: {len(training_data)} (保存于 distill/)")
 
 if __name__ == "__main__":
     main()
