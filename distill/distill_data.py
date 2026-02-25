@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import base64
 import copy
@@ -14,9 +15,15 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import random
 
+# ================= 路径动态挂载 =================
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+# 动态将 env_package 添加到环境变量，确保 graph_search 作为包被正确识别
+ENV_PKG_DIR = os.path.abspath(os.path.join(CURRENT_DIR, '../agent_system/environments/env_package'))
+sys.path.append(ENV_PKG_DIR)
+
 # 导入环境组件
-from envs import GraphSearchEnv
-from graph_visualizer import GraphVisualizer
+from graph_search.envs import GraphSearchEnv
+from graph_search.graph_visualizer import GraphVisualizer
 
 # ================= 配置与日志 =================
 parser = argparse.ArgumentParser()
@@ -28,7 +35,8 @@ args = parser.parse_args()
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.FileHandler(f"distill_{args.dataset}.log", mode='w')]
+    # 确保日志严格保存在 distill 目录下
+    handlers=[logging.FileHandler(os.path.join(CURRENT_DIR, f"distill_{args.dataset}.log"), mode='w')]
 )
 logger = logging.getLogger(__name__)
 
@@ -158,12 +166,14 @@ def main():
                         "target": t[i+1]
                     })
     
-    # 落盘
+    # 强制落盘到 distill 目录
     if training_data:
-        pd.DataFrame(training_data).to_parquet(f"{args.dataset}_training.parquet")
-        with open(f"{args.dataset}_stats.json", 'w') as f:
+        parquet_path = os.path.join(CURRENT_DIR, f"{args.dataset}_training.parquet")
+        stats_path = os.path.join(CURRENT_DIR, f"{args.dataset}_stats.json")
+        pd.DataFrame(training_data).to_parquet(parquet_path)
+        with open(stats_path, 'w') as f:
             json.dump(results, f, indent=2)
-        print(f"\n[SUCCESS] {args.dataset} 完成! 样本数: {len(training_data)}")
+        print(f"\n[SUCCESS] {args.dataset} 完成! 样本数: {len(training_data)} (保存于 {CURRENT_DIR})")
 
 if __name__ == "__main__":
     main()

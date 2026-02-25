@@ -1,11 +1,22 @@
 #!/bin/bash
 # 用法: bash run_sft_training.sh 8 ./output_dir
 
+# 锁定工作目录为当前脚本所在的 distill 文件夹
+cd "$(dirname "$0")"
+
 nproc_per_node=$1
 save_path=$2
 
+# ================= 环境变量配置 =================
+export WANDB_ENTITY="zzy_szsh"
+
 # 自动合并当前目录下所有的蒸馏 parquet 文件
-TRAIN_FILES=$(ls *_training.parquet | tr '\n' ',' | sed 's/,$//')
+TRAIN_FILES=$(ls *_training.parquet 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+
+if [ -z "$TRAIN_FILES" ]; then
+    echo "[ERROR] 未在当前目录下找到任何 *_training.parquet 数据集文件。"
+    exit 1
+fi
 
 echo "[INFO] 训练数据集: ${TRAIN_FILES}"
 

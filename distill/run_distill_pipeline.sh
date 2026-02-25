@@ -1,7 +1,11 @@
 #!/bin/bash
 
+# 锁定工作目录为当前脚本所在的 distill 文件夹
+cd "$(dirname "$0")"
+
 # ================= 配置区 =================
-MODEL_PATH="Qwen/Qwen3-VL-235B-A22B-Thinking"
+# 更新为本地教师模型的绝对路径
+MODEL_PATH="/Users/sianeko/vscode/verl-agent/Qwen3-VL-235B-A22B-Thinking"
 TP_SIZE=8           # GPU 数量
 PORT=8000
 DATASETS=("cora" "pubmed" "arxiv") # 需要处理的数据集列表
@@ -42,7 +46,8 @@ for DS in "${DATASETS[@]}"; do
     echo "[PROCESS] 正在蒸馏数据集: ${DS}"
     echo "--------------------------------------------------------"
     # 调用 Python 脚本，传入数据集名称
-    python distill_data.py --dataset ${DS} --num_tasks 500
+    # 假设 datasets 文件夹在 verl-agent 根目录，可以根据实际情况调整 --dataset_dir
+    python distill_data.py --dataset ${DS} --num_tasks 500 --dataset_dir "../datasets"
 done
 
 echo "========================================================"
