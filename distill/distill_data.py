@@ -54,24 +54,43 @@ def img_to_b64(img_array):
 def prepare_shared_assets(dataset_name, dataset_dir):
     logger.info(f"预加载数据集资产: {dataset_name}")
     
-    # 1. 提取真实任务 (center_id 和真实 answer)
+    # 1. 提取真实任务：结合图结构 json 和 train_slim.parquet (仅针对训练集进行蒸馏)
     json_path = os.path.join(dataset_dir, f"{dataset_name}.json")
     with open(json_path, 'r', encoding='utf-8') as f:
         raw = json.load(f)
+        
+    # 尝试读取训练集 ID
+    train_ids = set()
+    parquet_path = os.path.join(dataset_dir, f"{dataset_name}_train_slim.parquet")
+    if os.path.exists(parquet_path):
+        df = pd.read_parquet(parquet_path)
+        # 兼容常见的 ID 列名
+        id_col = 'node_id' if 'node_id' in df.columns else ('id' if 'id' in df.columns else df.columns[0])
+        train_ids = set(df[id_col].astype(int))
+        logger.info(f"成功加载训练集 Parquet，包含 {len(train_ids)} 个节点。")
+    else:
+        logger.warning(f"未找到 {parquet_path}，将回退到全图采集。")
     
     all_tasks = []
     for node in raw.get("nodes", []):
         nid = int(node["id"])
+        
+        # 【核心修正】如果存在训练集划分，过滤掉非训练集节点，防止数据泄露
+        if train_ids and nid not in train_ids:
+            continue
+            
         # 优先取 label，没有则取 proxy_info 中的 top1
         ans = node.get("label") or node.get("proxy_info", {}).get("top1") or "Unknown"
         all_tasks.append({"center_id": nid, "answer": ans})
     
-    # 2. 预加载文本库
-    text_path = os.path.join(dataset_dir, f"make_{dataset_name}_text.json")
+    # 2. 【核心修正】正确匹配截图中的文本库命名规则
+    text_path = os.path.join(dataset_dir, f"{dataset_name}_text.json")
     if not os.path.exists(text_path):
-        text_path = os.path.join(dataset_dir, "node_text_db.json") # Fallback
-    with open(text_path, 'r', encoding='utf-8') as f:
-        text_db = json.load(f)
+        logger.error(f"严重错误: 文本库文件不存在 {text_path}")
+        text_db = {}
+    else:
+        with open(text_path, 'r', encoding='utf-8') as f:
+            text_db = json.load(f)
 
     # 3. 构建共享 Payload 避免内存崩溃
     g_data, r_adj, c_map = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)

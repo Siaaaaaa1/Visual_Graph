@@ -15,13 +15,18 @@ echo "[START] 启动数据蒸馏全自动 Pipeline (Root: verl-agent)"
 echo "========================================================"
 
 # 1. 后台启动服务
-echo "[STEP 1] 启动 vLLM 后端服务 (235B 模型加载较慢，请稍后)..."
+# 提前设置环境变量，优化多进程并发内存分配
+export VLLM_WORKER_MULTIPROCESS_METHOD=spawn
+
+echo "[STEP 1] 启动 vLLM 后端服务 (已开启极速加载模式)..."
 python -m vllm.entrypoints.openai.api_server \
     --model ${MODEL_PATH} \
     --tensor-parallel-size ${TP_SIZE} \
     --port ${PORT} \
     --max-model-len 16384 \
-    --served-model-name qwen3-vl-teacher > ${SERVER_LOG} 2>&1 &
+    --served-model-name qwen3-vl-teacher \
+    --enforce-eager \
+    --distributed-executor-backend mp > ${SERVER_LOG} 2>&1 &
 
 VLLM_PID=$!
 trap "kill -9 $VLLM_PID; echo '[EXIT] 服务已强制关闭'; exit" SIGINT SIGTERM EXIT
