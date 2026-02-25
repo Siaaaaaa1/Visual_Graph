@@ -19,8 +19,9 @@ python -m vllm.entrypoints.openai.api_server \
     --tensor-parallel-size ${TP_SIZE} \
     --port ${PORT} \
     --max-model-len 8192 \
-    --max-num-seqs 256 \
-    --gpu-memory-utilization 0.95 \
+    --max-num-seqs 64 \
+    --max-num-batched-tokens 4096 \
+    --gpu-memory-utilization 0.85 \
     --served-model-name qwen3-vl-teacher > ${SERVER_LOG} 2>&1 &
 
 VLLM_PID=$!

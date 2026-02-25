@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # 使用 8080 端口
 API_URL = "http://localhost:8080/v1/chat/completions"
-MAX_CONCURRENT_REQUESTS = 128  # 压榨 GPU 的核心并发数控制
+MAX_CONCURRENT_REQUESTS = 32  # 压榨 GPU 的核心并发数控制
 MAX_RETRIES = 10               # 10次未成功则丢弃
 
 # ================= CPU 密集型辅助函数 =================
