@@ -131,4 +131,8 @@ outputs
 data/
 .tmp
 *ports
-
+datasets/**/*.parquet
+datasets/**/*.json
+datasets/**/*.csv
+debug_figs/
+Check_Log/

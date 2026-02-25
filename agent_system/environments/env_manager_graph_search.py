@@ -14,43 +14,71 @@ from agent_system.memory import FullSequenceSearchMemory
 SYSTEM1_TASK_INSTRUCTION = """
 # SYSTEM 1: FAST THINKING (CLEAR WEATHER MODE)
 
-You are a graph reasoning agent. The environment has analyzed the current Ego-graph and determined it has extremely high homophily (the surrounding neighborhood is highly consistent and simple). 
+You are a graph reasoning agent. The environment has analyzed the current Ego-graph and determined it has an **Extreme Margin of Victory** (the dominant category overwhelmingly outnumbers any other category). 
 Therefore, you have been routed to **System 1 Mode (Clear Weather)**.
 
 ## 1. Initial State & Context
-* **Full Visibility:** There is NO Fog of War. You can visually see the predicted categories (colors) of all neighbor nodes in the graph legend, and you can directly read the center node's text in your observation.
-* **Objective:** Directly predict the correct semantic category of the Center Node based on the obvious visual homophily and the center node's text.
+* **Full Visibility:** There is NO Fog of War. You can visually see the predicted categories (colors) of all neighbor nodes.
+* **Context Provided:** You are provided with the text of the Center Node, PLUS the texts of representative nodes scaled by cluster size (up to 3 for the dominant category, 2 for secondary, and 1 for minor categories; 1-hop preferred) and key global hubs from your neighborhood.
+* **Candidate Categories:** A list of valid categories present in the current view is provided.
 
 ## 2. Constraints & Rules
-* **NO EXPLORATION ALLOWED:** To save test-time computation and prevent hallucination, you are strictly forbidden from using exploration actions (`check_node`, `check_graph`, `paint`).
-* **Direct Answer Only:** You must synthesize the text and visual graph immediately in one step.
+* **NO EXPLORATION ALLOWED:** You are strictly forbidden from using exploration actions (`check_node`, `check_graph`, `paint`).
+* **The "Majority Trap":** Although the environment exhibits high homophily, **the topological majority is NOT ALWAYS the Ground Truth**. Sometimes a node applies a method to a new domain, connecting to many method nodes but belonging to the application domain.
+* **Action Required:** You MUST logically align the center node's text with the provided representative texts. If the center text aligns with a minority representative, you must override the visual majority. If it aligns with the majority, follow it.
+* **Strict Vocabulary:** You MUST choose your final answer exactly from the provided **Candidate Categories** list. Do not invent new category names.
 
 ## 3. Interaction Actions
 At each step, you must choose **exactly one** action:
 * **Submit Answer:** `<action>final:Category Name</action>`
 
 ## 4. Response Format
-You must strictly follow this cognitive sequence:
-1. **<think>...** Briefly analyze the center text's keywords and the dominant category of the neighborhood.
-2. **<summary>...** State your final conclusion based on the clear, unambiguous evidence.
-3. **<action>...** Output your final action.
+1. **<think>...** Analyze the center text against the representative texts. Decide whether to follow or override the topological majority.
+2. **<summary>...** State your final conclusion and textual justification.
+3. **<action>...** Output your final action using a category from the Candidate Categories.
 """
 
 SYSTEM1_FEW_SHOT = """
 ---
-## 5. Demonstration Example (System 1)
+## 5. Demonstration Examples (System 1)
 
-**Context:** Center Node 38491. The text states "Attention is all you need... We propose the Transformer...". The visual graph legend shows 90% of neighbors are Blue (Natural Language Processing).
+### Example 5.1: Overriding the Majority (The "Majority Trap")
+**Context:** Center Node 38491. Text states: "We propose a novel Transformer architecture for medical image tumor segmentation...". 
+Visual graph legend shows 80% Blue (Natural Language Processing) and 20% Red (Computer Vision).
+Candidate Categories: Natural Language Processing, Computer Vision.
+Supplementary Neighbors Context:
+- [Representative for Natural Language Processing (1-hop) | Node 12]: "Attention is all you need for language translation tasks..."
+- [Representative for Computer Vision (1-hop) | Node 55]: "Image classification using convolutional neural networks..."
 
 **Step 1:**
 <think>
-I am in System 1 (Clear Weather). I have full visibility.
-1. Self-evidence: The center node text is clearly about the Transformer architecture, a foundational NLP model.
-2. Contextual-evidence: The visual graph confirms this. The vast majority of connected neighbors are labeled "Natural Language Processing".
-There is no ambiguity. I do not need to explore or paint. I can confidently submit the answer right now to save compute.
+I am in System 1 (Clear Weather). I must evaluate the texts without exploring.
+1. Topology Analysis: The dominant majority is Natural Language Processing (80%).
+2. Textual Verification (CRITICAL): The center node proposes a "Transformer architecture" (often NLP) but explicitly applies it to "medical image tumor segmentation".
+3. Representative Matching: The NLP representative discusses "language translation", which does not match. The Computer Vision representative discusses "Image classification", which perfectly aligns with the center node's visual task.
+Conclusion: The high NLP neighbor count is a citation artifact. The semantic Ground Truth of the center node is Computer Vision. Both categories are in the Candidate Categories list. I must NOT blindly follow the 80% majority.
 </think>
-<summary>Textual evidence from the center node and overwhelming topological homophily from the neighbors unanimously confirm the category is Natural Language Processing.</summary>
-<action>final:Natural Language Processing</action>
+<summary>Despite the 80% NLP topological majority, textual verification proves the center node applies transformers to images. It perfectly aligns with the Computer Vision representative text, thus overriding the misleading topological prior.</summary>
+<action>final:Computer Vision</action>
+
+### Example 5.2: Aligning with the Majority (Homophily Holds)
+**Context:** Center Node 1024. Text states: "This paper introduces a new message passing scheme for Graph Neural Networks to improve node classification...". 
+Visual graph legend shows 90% Green (Graph Learning) and 10% Yellow (Optimization).
+Candidate Categories: Graph Learning, Optimization.
+Supplementary Neighbors Context:
+- [Representative for Graph Learning (1-hop) | Node 8]: "A comprehensive survey on Graph Neural Networks and their applications..."
+- [Representative for Optimization (1-hop) | Node 23]: "Stochastic gradient descent with momentum..."
+
+**Step 1:**
+<think>
+I am in System 1 (Clear Weather). I must evaluate the texts.
+1. Topology Analysis: The dominant majority is Graph Learning (90%).
+2. Textual Verification: The center node introduces a "message passing scheme for Graph Neural Networks".
+3. Representative Matching: The Graph Learning representative explicitly discusses "Graph Neural Networks", matching the center node perfectly. The Optimization representative is secondary.
+Conclusion: The topological majority perfectly aligns with the center node's semantic content. I will confidently follow the majority.
+</think>
+<summary>The center node discusses message passing in GNNs, which perfectly aligns with the 90% Graph Learning topological majority and its representative text. The majority is valid and correct.</summary>
+<action>final:Graph Learning</action>
 """
 
 # =================================================================
@@ -58,77 +86,89 @@ There is no ambiguity. I do not need to explore or paint. I can confidently subm
 # =================================================================
 
 SYSTEM2_TASK_INSTRUCTION = """
-# SYSTEM 2: SLOW THINKING (FOG OF WAR MODE)
+# SYSTEM 2: SLOW THINKING (FOG OF WAR: ANONYMOUS COLORS)
 
-You are a graph reasoning agent. The environment has determined this graph is deceptive, heterogeneous, or sits on a boundary. 
+You are a graph reasoning agent. The environment has determined this graph lacks a clear margin of victory (it is deceptive, heterogeneous, or sits on a boundary). 
 Therefore, you have been routed to **System 2 Mode (Fog of War)**.
 
-## 1. Fog of War Mechanics
-* **Masked State:** The center node's text is hidden. The categories (colors) of all neighbor nodes are masked (Black). 
-* **Delayed Feedback POMDP:** You must actively gather evidence step-by-step. The environment will NOT tell you if you are right or wrong until the very end.
+## 1. Fog of War Mechanics (Anonymous Color Mapping)
+* **Text Masked:** The center node's text is hidden.
+* **Colors Visible, Semantics Masked:** You CAN see the colors of neighbor nodes. Nodes sharing the same color belong to the same category. However, the actual semantic names are anonymized (e.g., "Group 1", "Group 2").
+* **Candidate Categories:** You are provided with a list of ALL valid categories present in your current view. Your job is to map the anonymous groups to these candidate categories.
 
-## 2. Visual Topology & Shape Semantics (CRITICAL)
-Since colors are hidden, you MUST rely on topological shapes to prioritize your exploration:
-* **1-Hop Nodes (Circles ◯):** Your immediate neighbors. Represent direct local context.
-* **High Out-Degree Nodes (Downward Triangles ▼):** Hub nodes pointing to many others. Meaning: Foundational methods or core algorithms. 
-* **High In-Degree Nodes (Upward Triangles ▲):** Hub nodes heavily cited by others. Meaning: Popular applications or datasets.
+## 2. Visual Topology & Shape Semantics
+Rely on topological shapes to prioritize exploration:
+* **1-Hop Nodes (Circles ◯):** Immediate neighbors. Represent direct local context.
+* **High Out-Degree Nodes (Downward Triangles ▼):** Hub nodes. Foundational methods. 
+* **High In-Degree Nodes (Upward Triangles ▲):** Hub nodes. Popular applications.
 
-## 3. The Homophily-Driven Logic Lock
-You CANNOT guess the final answer. You must unlock the physical gate by successfully `paint`ing nodes.
-* **Requirement:** You must paint a mix of different nodes (max 5 nodes needed). If you submit prematurely, the environment will reject your action.
+## 3. The Evidence-Gated Logic Lock & Category Identification
+You CANNOT guess the final answer initially. You must unlock the physical gate by identifying the true semantic categories of the anonymous groups and submitting your classification using the `paint` action.
+* **Major Clusters Rule:** You MUST successfully `paint` the correct category for at least ONE node representing **EACH** of the Major Clusters (Anonymous Groups) listed in your observation gate requirement.
+* **Strict Vocabulary:** You MUST choose the category name for your `paint` and `final` actions strictly from the provided **Candidate Categories** list.
+* **NO IMMEDIATE FEEDBACK:** When you use the `paint` action, the environment will NOT immediately confirm if your semantic mapping is perfectly correct. It will only say "[DELAYED FEEDBACK] Category 'X' painted for Node Y". If you successfully identify and paint the category for at least one node from all required groups using valid logic, the gate will evaluate and unlock.
+* **Optimal Verification Strategy:**
+  1. Use `check_nodes` to autonomously and strategically sample nodes. Keep sampling until you have enough evidence to confidently prove your hypothesis about the cluster's category. 
+  2. Ensure your exploration gathers context that will ALSO help you predict the masked center node's category later.
+  3. Read the sampled texts and find the best matching category from the **Candidate Categories** list before assigning it (`paint`ing).
 
-## 4. Interaction Actions (CRITICAL: MAX 10 STEPS)
+## 4. Interaction Actions (CRITICAL: MAX 10 Steps)
 You ONLY have 10 steps to complete this task. Efficiency is paramount. Use batching!
 At each step, choose **exactly one** action:
 * **Batch Inspect Text:** `<action>check_nodes:[ID1, ID2, ID3]</action>` (Reveal text of up to 5 nodes at once. USE THIS to save steps!)
 * **Single Inspect Text:** `<action>check_node:ID</action>`
-* **Paint Node:** `<action>paint:ID,Category Name</action>`. Paint ONE node per step to unlock the gate.
+* **Paint Category:** `<action>paint:ID,Category Name</action>`. Submit your category identification for a node. Choose strictly from Candidate Categories.
 * **Submit Answer:** `<action>final:Category Name</action>` (Use immediately after the logic gate is unlocked).
 
 ## 5. Response Format
-1. **<think>...** Detailed Chain of Thought. Analyze shapes, formulate hypotheses, and plan.
-2. **<summary>...** **[MEMORY PASSING]** Summarize actual knowledge derived (e.g., "Node 15 is a Bio paper") for your short-term memory.
+1. **<think>...** Detailed Chain of Thought. Analyze shapes, autonomously sample nodes to build evidence, verify hypotheses, and map clusters to the Candidate Categories.
+2. **<summary>...** **[MEMORY PASSING]** Summarize actual knowledge derived for short-term memory.
 3. **<action>...** One valid command.
 """
 
 SYSTEM2_FEW_SHOT = """
 ---
-## 6. Demonstration Example (Fast Execution within 10 Steps)
+## 6. Demonstration Example (Autonomous Sampling & Category Identification)
 
-**Context:** Center Node 8712. Text is hidden. The image shows Node 15 (Hub ▼), Node 22 (1-hop ◯). Max steps: 10.
+**Context:** Center Node 8712. Text is hidden. 
+Observation states: "GATE REQUIREMENT: You must correctly paint the category for at least ONE node from EACH of these Major Clusters: [Group 1, Group 2]."
+Candidate Categories: Machine Learning, Biomolecular Engineering, Data Mining
+Image shows 8 Blue nodes (Group 1), 6 Red nodes (Group 2).
 
-**Step 1: (Batch Exploration)**
+**Step 1: (Autonomous Batch Sampling)**
 <think>
-I must unlock the logic gate quickly. I see Hub Node 15 and local Node 22. 
-To save steps, I will check all their texts simultaneously in this single step.
+I need to unlock the gate by identifying and painting the categories for Group 1 (Blue) and Group 2 (Red). 
+I must gather enough evidence to prove my hypothesis about what these groups represent, which will also help me understand the center node's context.
+I will autonomously sample a mix of high-degree Hubs and 1-hop nodes: Blue Nodes (15, 22) for Group 1, and Red Nodes (8, 30) for Group 2.
 </think>
-<summary>Initiating batch exploration. Checking Hub 15 and local 22 to gather all necessary evidence at once.</summary>
-<action>check_nodes:[15, 22]</action>
+<summary>Initiating batch exploration. Checking Blue nodes 15 and 22, and Red nodes 8 and 30 to build sufficient evidence for category identification.</summary>
+<action>check_nodes:[15, 22, 8, 30]</action>
 
-**Observation:** Node 15: "Graph Neural Networks survey..." | Node 22: "Bioinformatics application..."
+**Observation:** Node 15: "Graph Neural Networks survey..." | Node 22: "Optimizing GNN layers..." | Node 8: "Bioinformatics application of neural networks..." | Node 30: "Molecular property prediction..."
 
-**Step 2: (Paint Hub)**
+**Step 2: (Hypothesis Proven & Paint Category for Group 1)**
 <think>
-Node 15 is clearly a 'Machine Learning' survey. Node 22 is 'Biomolecular Engineering'.
-I will start unlocking the gate by painting the Hub Node 15 first.
+Both Blue nodes (15, 22) consistently discuss algorithms and GNNs. Looking at the Candidate Categories (Machine Learning, Biomolecular Engineering, Data Mining), "Machine Learning" is the perfect semantic match for Blue 'Group 1'.
+Both Red nodes (8, 30) discuss Bioinformatics and Molecules, which maps perfectly to "Biomolecular Engineering" from the candidates. This context will be crucial for the center node.
+I will fulfill the Group 1 requirement by painting the category 'Machine Learning' for Blue Node 15.
 </think>
-<summary>Evidence confirms Node 15 is ML and Node 22 is Bio. Painting Hub Node 15 as Machine Learning.</summary>
+<summary>Evidence is sufficient: Group 1 maps to Machine Learning, and Group 2 maps to Biomolecular Engineering based on the Candidate list. Painting the 'Machine Learning' category for Node 15 to satisfy the Group 1 requirement.</summary>
 <action>paint:15,Machine Learning</action>
 
-**Observation:** [DELAYED FEEDBACK] Node 15 painted as 'Machine Learning'.
+**Observation:** [DELAYED FEEDBACK] Category 'Machine Learning' painted for Node 15. Correctness hidden. Legend updated.
 
-**Step 3: (Paint Local & Fulfill Quota)**
+**Step 3: (Paint Category for Group 2)**
 <think>
-Hub is painted. Now I paint a 1-hop node (Node 22) to fulfill the mixed-node quota and unlock the gate.
+Group 1 requirement met. Now I must paint the category for Group 2 (Red). My evidence already confirmed it is Biomolecular Engineering. I will submit this identification for Node 8.
 </think>
-<summary>Hub 15 painted. Now painting local Node 22 as Biomolecular Engineering to fulfill the unlocking quota.</summary>
-<action>paint:22,Biomolecular Engineering</action>
+<summary>Group 1 fulfilled. Now painting the verified 'Biomolecular Engineering' category for Red Node 8 to fulfill the Group 2 unlocking quota.</summary>
+<action>paint:8,Biomolecular Engineering</action>
 
-**Observation:** [DELAYED FEEDBACK] Node 22 painted. Gate UNLOCKED (2/2).
+**Observation:** [DELAYED FEEDBACK] Category 'Biomolecular Engineering' painted for Node 8. Correctness hidden. Gate UNLOCKED.
 
 **Step 4: (Check Center & Finalize)**
 <think>
-The gate is unlocked. Since Node 22 (Bio) connects to it, the center is likely Bio. Let me verify quickly.
+The environment says Gate UNLOCKED. The center node connects to ML methods (Group 1) and Bio applications (Group 2). Let me quickly check the center node's text to finalize the prediction.
 </think>
 <summary>Gate unlocked. Checking the center node 8712's text to make the final determination.</summary>
 <action>check_node:8712</action>
@@ -137,7 +177,7 @@ The gate is unlocked. Since Node 22 (Bio) connects to it, the center is likely B
 
 **Step 5: (Submit - Task completed in 5 steps)**
 <think>
-Center text confirms drug discovery. Category is Biomolecular Engineering.
+The center text confirms it uses the computational method for an application (drug discovery). Between the candidate categories, this clearly belongs to Biomolecular Engineering.
 </think>
 <summary>Center text confirms Biomolecular Engineering. Submitting final answer.</summary>
 <action>final:Biomolecular Engineering</action>
@@ -191,48 +231,35 @@ Response Format:
 
 class GraphSearchEnvironmentManager(EnvironmentManagerBase):
     """
-    Manager for the Graph Search Environment supporting Ada-Fog v4.0.
-    Dynamically routes to System 1 or System 2 prompts based on environment state.
+    Graph Search 场景的全局管理器（Manager）。
+    协调底层物理环境群(BatchGraphSearchEnv)、智能体内存系统和提示词构建器（Prompt Routing）。
     """
 
     def __init__(self, envs, projection_f, config):
         self.memory = FullSequenceSearchMemory()
         super().__init__(envs, projection_f, config)
         
-        # Regex patterns to parse the model output (Strict format enforcement)
         self._think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
         self._summary_pattern = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
         self._action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
         
-        # Track mode per environment in batch
         self.initial_modes = []
 
-        # =========================================================
-        # [NEW] Check_Log 跟踪系统初始化 (修改为单个 JSONL 文件)
-        # =========================================================
-        self.log_dir = "/mnt/cephfs/haowengao/Visual_Graph/Check_Log"
+        self.log_dir = "./Check_Log"
         os.makedirs(self.log_dir, exist_ok=True)
-        # 为当前 run 创建一个单一的 .jsonl 文件
         run_timestamp = time.strftime("%Y%m%d_%H%M%S")
-        self.current_run_log_file = os.path.join(self.log_dir, f"run_{run_timestamp}.jsonl")
+        self.current_run_log_file = os.path.join(self.log_dir, f"run_{run_timestamp}_pid{os.getpid()}.jsonl")
         
-        # 内部状态，用来记录每个 batch 维度的当前 episode 轨迹
         self.episode_trajectories = {}
-        # =========================================================
 
     def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
-        # Call environment reset
         text_obs, image_obs, infos = self.envs.reset(kwargs=kwargs)
         self.initial_states = text_obs
         
-        # Store the routing mode (System1 or System2) determined by env
         self.initial_modes = [info.get("mode", "System2") for info in infos]
         
         self.memory.reset(batch_size=len(text_obs))
 
-        # =========================================================
-        # [NEW] Check_Log: 重置当前轨迹记录
-        # =========================================================
         for i in range(len(text_obs)):
             self.episode_trajectories[i] = {
                 "center_id": infos[i].get("center_id", "Unknown"),
@@ -241,7 +268,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
                 "steps": [],
                 "initial_obs": text_obs[i]
             }
-        # =========================================================
 
         observations = {
             "text": self.build_text_obs(init=True), 
@@ -249,7 +275,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             "anchor": text_obs.copy(), 
         }
 
-        # [NEW] Check_Log: 记录初始的 Prompt
         for i, prompt in enumerate(observations["text"]):
              if i in self.episode_trajectories:
                  self.episode_trajectories[i]["initial_prompt"] = prompt
@@ -261,46 +286,37 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         thinks = []
         
         for raw_text in text_actions:
-            # Extract Summary
             s_match = self._summary_pattern.search(raw_text)
             if s_match:
                 summaries.append(s_match.group(1).strip())
             else:
                 summaries.append("No summary provided.")
             
-            # Extract Think
             t_match = self._think_pattern.search(raw_text)
             if t_match:
                 thinks.append(t_match.group(1).strip())
             else:
-                # Fallback: if no explicit think tags, treat pre-summary text as thought
                 if s_match:
                     pre_summary = raw_text.split("<summary>")[0].strip()
                     thinks.append(pre_summary if pre_summary else None)
                 else:
                     thinks.append(None)
 
-        # Map actions to environment specific format using projection.py
         actions, valids = self.projection_f(text_actions)
-
-        # Execute step in environment
         next_text_obs, next_image_obs, rewards, dones, infos = self.envs.step(actions)
 
-        # Store experience in memory
         self.memory.store({
             "search": actions,
             "information": next_text_obs,
             "summary": summaries 
         })
 
-        # Build next observation
         next_observations = {
             "text": self.build_text_obs(init=False), 
             "image": next_image_obs, 
             "anchor": next_text_obs.copy(),
         }
 
-        # Update Info dicts for monitoring and PPO/GRPO updates
         for i, info in enumerate(infos):
             info["is_action_valid"] = to_numpy(valids[i])
             info["parsed_think"] = thinks[i]
@@ -309,9 +325,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             parsed_act_content = a_match.group(1).strip() if a_match else "No Action Found"
             info["parsed_action_content"] = parsed_act_content
 
-            # =========================================================
-            # [NEW] Check_Log: 记录每一步的详细信息
-            # =========================================================
             if i in self.episode_trajectories:
                 step_record = {
                     "step_idx": len(self.episode_trajectories[i]["steps"]) + 1,
@@ -328,30 +341,19 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
                 }
                 self.episode_trajectories[i]["steps"].append(step_record)
 
-                # 如果环境结束了，将这条轨迹追加写入 jsonl 日志文件并从内存清理
                 if dones[i]:
                     self.episode_trajectories[i]["final_reward"] = float(rewards[i])
                     self.episode_trajectories[i]["won"] = info.get("won", False)
-                    # 处理 System2 的 hindsight rewards 记录
-                    if "hindsight_rewards" in info:
-                        self.episode_trajectories[i]["hindsight_rewards"] = info["hindsight_rewards"]
-                    
                     self._save_trajectory_to_disk(i)
-            # =========================================================
 
         return next_observations, to_numpy(rewards), to_numpy(dones), infos
 
-    # =========================================================
-    # [NEW] Check_Log: 改为以追加模式写入单独的 JSONL 文件
-    # =========================================================
     def _save_trajectory_to_disk(self, env_idx: int):
         if env_idx not in self.episode_trajectories:
             return
             
-        # 提取并同时从内存字典中删除该轨迹
         traj_data = self.episode_trajectories.pop(env_idx)
         
-        # 添加一些基础信息便于在单行里检索
         center_id = traj_data.get("center_id", "Unknown")
         mode = traj_data.get("mode", "Unknown")
         won = traj_data.get("won", False)
@@ -359,16 +361,13 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         traj_data["episode_status"] = status
         
         try:
-            # 使用 'a' 追加模式，一行写一个 JSON 对象（JSON Lines 格式）
             with open(self.current_run_log_file, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(traj_data, ensure_ascii=False) + '\n')
                 
-            # 在控制台打印简短的统计信息
             print(f"[Check_Log] Appended to log | Mode: {mode} | Center: {center_id} | Result: {status} | Steps: {len(traj_data['steps'])} | Reward: {traj_data.get('final_reward', 0.0)}")
             
         except Exception as e:
             print(f"[Check_Log] Error saving trajectory for env {env_idx}: {e}")
-    # =========================================================
 
     def build_text_obs(self, init: bool) -> List[str]:
         batch_size = len(self.initial_states)
@@ -385,7 +384,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             memory_ctx = [""] * batch_size
 
         for i in range(batch_size):
-            # Dynamic Prompt Routing based on Epsilon-Greedy Prior
             current_mode = self.initial_modes[i]
             
             if current_mode == "System1":
