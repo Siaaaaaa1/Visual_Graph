@@ -81,62 +81,86 @@ def prepare_shared_assets(dataset_name, dataset_dir):
     return all_tasks, text_db, shared_payload
 
 # ================= 蒸馏 Episode 逻辑 =================
-def run_episode(task, text_db, shared_payload):
+def run_episode(task, text_db, shared_payload, max_retries=30):
     tid = task["center_id"]
-    tau_val = random.choice([0.2, 0.4, 0.6]) # 增加多样性
     
-    env = GraphSearchEnv(
-        max_steps=10,
-        node_text_db=text_db,
-        dataset_name=args.dataset,
-        dataset_dir=args.dataset_dir,
-        shared_graph_data=shared_payload,
-        tau=tau_val
-    )
-    
-    obs_text, obs_img, info = env.reset(task)
-    raw_traj = []
-    msgs = [{"role": "system", "content": "You are a graph reasoning expert. Think step-by-step in <think> tags and act in <action> tags."}]
-    
-    step_count, process_rewards, final_reward = 0, 0.0, 0.0
-    done = False
-    
-    while not done:
-        # 组装消息
-        user_content = [{"type": "text", "text": obs_text}]
-        if obs_img is not None:
-            b64_img = img_to_b64(obs_img)
-            user_content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
-            img_bytes = ndarray_to_bytes(obs_img)
-        else:
-            img_bytes = None
-
-        msgs.append({"role": "user", "content": user_content})
-        raw_traj.append({"role": "user", "content": [{"type": "text", "text": obs_text}, {"type": "image", "bytes": img_bytes}]})
+    for attempt in range(max_retries):
+        # 动态调整温度：每次失败稍微提高温度 (从0.6开始，每次+0.02，最高不超过1.0)
+        # 这样在模型卡住时，后续尝试会有更高的探索性和多样性
+        current_temp = min(0.6 + (attempt * 0.02), 1.0)
         
-        try:
-            res = client.chat.completions.create(model="qwen3-vl-teacher", messages=msgs, temperature=0.6, stop=["</action>"])
-            ans_text = res.choices[0].message.content + "</action>"
-        except Exception as e:
-            logger.error(f"Task {tid} API Error: {e}")
-            break
-
-        msgs.append({"role": "assistant", "content": ans_text})
-        raw_traj.append({"role": "assistant", "content": ans_text})
+        tau_val = random.choice([0.2, 0.4, 0.6]) # 每次尝试也可以换不同的多样性参数
         
-        action = re.search(r"<action>(.*?)</action>", ans_text, re.S | re.I)
-        action_str = action.group(1).strip() if action else "ERROR"
+        env = GraphSearchEnv(
+            max_steps=10,
+            node_text_db=text_db,
+            dataset_name=args.dataset,
+            dataset_dir=args.dataset_dir,
+            shared_graph_data=shared_payload,
+            tau=tau_val
+        )
         
-        obs_text, obs_img, r, done, s_info = env.step(action_str)
-        step_count += 1
-        if 0 < r < 1.0: process_rewards += r
-        if done: final_reward = r
+        obs_text, obs_img, info = env.reset(task)
+        raw_traj = []
+        msgs = [{"role": "system", "content": "You are a graph reasoning expert. Think step-by-step in <think> tags and act in <action> tags."}]
+        
+        step_count, process_rewards, final_reward = 0, 0.0, 0.0
+        done = False
+        api_error = False
+        
+        while not done:
+            # 组装消息
+            user_content = [{"type": "text", "text": obs_text}]
+            if obs_img is not None:
+                b64_img = img_to_b64(obs_img)
+                user_content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
+                img_bytes = ndarray_to_bytes(obs_img)
+            else:
+                img_bytes = None
 
-    # 质量门控
-    if final_reward < 1.0 or step_count > 8: return None
-    if info["mode"] == "System2" and process_rewards <= 0: return None
-    
-    return {"task_id": tid, "mode": info["mode"], "steps": step_count, "traj": raw_traj}
+            msgs.append({"role": "user", "content": user_content})
+            raw_traj.append({"role": "user", "content": [{"type": "text", "text": obs_text}, {"type": "image", "bytes": img_bytes}]})
+            
+            try:
+                # 使用动态调整的温度
+                res = client.chat.completions.create(model="qwen3-vl-teacher", messages=msgs, temperature=current_temp, stop=["</action>"])
+                ans_text = res.choices[0].message.content + "</action>"
+            except Exception as e:
+                logger.error(f"Task {tid} API Error on attempt {attempt+1}: {e}")
+                api_error = True
+                break
+
+            msgs.append({"role": "assistant", "content": ans_text})
+            raw_traj.append({"role": "assistant", "content": ans_text})
+            
+            action = re.search(r"<action>(.*?)</action>", ans_text, re.S | re.I)
+            action_str = action.group(1).strip() if action else "ERROR"
+            
+            obs_text, obs_img, r, done, s_info = env.step(action_str)
+            step_count += 1
+            if 0 < r < 1.0: process_rewards += r
+            if done: final_reward = r
+
+        # 如果是因为 API 错误中断，直接进入下一次尝试
+        if api_error:
+            continue
+
+        # ====== 质量门控校验 ======
+        is_valid = True
+        if final_reward < 1.0 or step_count > 8: 
+            is_valid = False
+        if info["mode"] == "System2" and process_rewards <= 0: 
+            is_valid = False
+        
+        # 如果成功通过校验，直接返回结果退出循环
+        if is_valid:
+            if attempt > 0:
+                logger.info(f"Task {tid} 成功通过 (耗费尝试次数: {attempt + 1}, 最终温度: {current_temp:.2f})")
+            return {"task_id": tid, "mode": info["mode"], "steps": step_count, "traj": raw_traj}
+            
+    # ====== 如果 30 次尝试全部失败 ======
+    logger.warning(f"Task {tid} 尝试了 {max_retries} 次均未能成功通过质量门控，最终放弃。")
+    return None
 
 # ================= 主循环 =================
 def main():
@@ -170,7 +194,7 @@ def main():
         pd.DataFrame(training_data).to_parquet(parquet_path)
         with open(stats_path, 'w') as f:
             json.dump(results, f, indent=2)
-        print(f"\n[SUCCESS] {args.dataset} 完成! 样本数: {len(training_data)} (保存于 distill/)")
+        print(f"\n[SUCCESS] {args.dataset} 完成! 有效任务数: {len(results)}, 样本数: {len(training_data)} (保存于 distill/)")
 
 if __name__ == "__main__":
     main()
