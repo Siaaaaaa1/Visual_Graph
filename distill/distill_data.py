@@ -107,8 +107,14 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "stop": ["</action>"]
     }
     async with sem:
-        async with session.post(API_URL, json=payload, timeout=aiohttp.ClientTimeout(total=120)) as response:
-            response.raise_for_status()
+        # 【核心修复1】全方位放宽超时限制：整体1小时，连接5分钟，单次读取1小时
+        timeout = aiohttp.ClientTimeout(total=3600, connect=300, sock_read=3600)
+        async with session.post(API_URL, json=payload, timeout=timeout) as response:
+            # 【核心修复2】捕获非200的报错文本，便于暴露如超长上下文(HTTP 400)等问题
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"HTTP {response.status}: {error_text}")
+                
             data = await response.json()
             return data["choices"][0]["message"]["content"] + "</action>"
 
@@ -156,7 +162,9 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
                 try:
                     ans_text = await fetch_completion(session, msgs, current_temp, sem)
                 except Exception as e:
-                    logger.error(f"Task {tid} API Error on attempt {attempt+1}: {e}")
+                    # 【核心修复3】使用 repr 强制解析对象，避免 TimeoutError 打出空字符串
+                    err_msg = repr(e)
+                    logger.error(f"Task {tid} API Error on attempt {attempt+1}: {err_msg}")
                     api_error = True
                     break
 
@@ -280,5 +288,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main_async())
     except KeyboardInterrupt:
-        # 捕捉最外层的 Ctrl+C 避免打印冗长回溯堆栈
         pass
