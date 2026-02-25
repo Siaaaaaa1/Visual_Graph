@@ -630,11 +630,18 @@ class TrajectoryCollector:
         assert len(total_batch_list) == len(total_episode_rewards)
 
         # =========================================================
-        # [NEW] Absolute Filtering Logic (绝对过滤逻辑)
+        # [NEW] Absolute Filtering Logic (绝对过滤逻辑 - 已修复一致性问题)
         # =========================================================
         group_size = self.config.env.rollout.n
+        
+        # 第一步：初始化所有样本的标记。确保 DataProto 中该 key 的长度覆盖全样本。
+        if is_train:
+            for i in range(len(total_batch_list)):
+                for step_data in total_batch_list[i]:
+                    step_data['is_filtered'] = False
+
+        # 第二步：对满足条件的组执行绝对过滤
         if is_train and group_size > 1:
-            # total_success['success_rate'] 存储了每条轨迹的 won (0 或 1)
             outcomes = np.array(total_success.get('success_rate', []))
             
             if len(outcomes) == len(total_episode_rewards):
@@ -643,15 +650,13 @@ class TrajectoryCollector:
                     
                     # 判断该组是否全败 (all 0) 或全胜 (all 1)
                     if np.all(group_slice == 0) or np.all(group_slice == 1):
-                        # 1. 抹平总轨迹奖励，使得该组在日志计算中的 std 为 0
+                        # 抹平该组的总奖励
                         total_episode_rewards[i : i + group_size] = 0.0
                         
-                        # 2. 遍历组内轨迹，抹平单步奖励并打上绝对过滤标签
+                        # 抹平该组内每条轨迹的每一步奖励，并标记过滤
                         for j in range(i, i + group_size):
                             for step_data in total_batch_list[j]:
-                                # 抹除单步奖励，防止中间奖励产生方差
                                 step_data['step_reward'] = 0.0
-                                # 注入关键标记，供 episode.py 识别以跳过格式奖励
                                 step_data['is_filtered'] = True 
         # =========================================================
 
@@ -659,7 +664,6 @@ class TrajectoryCollector:
         # [NEW] GRPO Advantage Logger Intersection
         # =========================================================
         try:
-            group_size = self.config.env.rollout.n
             if group_size > 1 and is_train:
                 env_modes = []
                 for i in range(len(total_batch_list)):
@@ -688,7 +692,7 @@ class TrajectoryCollector:
             tool_callings=totoal_tool_callings,
         )
         
-        # --- 优化后的保存逻辑 ---
+        # --- 保存逻辑 (保持不变) ---
         REMOVE_KEYS = ['pixel_values', 'image_grid_thw'] 
         PARENT_KEY = 'multi_modal_inputs' 
         END_KEYS = ['model_response_text', 'anchor_obs', 'final_prompt_text', 'raw_prompt', 'parsed_think']
@@ -727,7 +731,7 @@ class TrajectoryCollector:
 
             with open(output_file, 'a', encoding='utf-8') as f:
                 for i in range(batch_size):
-                    row = {}
+                    row = {} 
                     if 'index' in non_tensor_data:
                         row['index'] = make_serializable(non_tensor_data['index'][i])
                     
