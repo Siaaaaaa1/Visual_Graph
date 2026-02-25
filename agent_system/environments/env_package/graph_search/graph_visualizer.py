@@ -88,7 +88,7 @@ class GraphVisualizer:
 
         self.max_save_figs = 100        
         self.saved_fig_count = 0        
-        self.save_prob = 0.05           
+        self.save_prob = 0         
         self.save_dir = "./debug_figs"  
         os.makedirs(self.save_dir, exist_ok=True) 
 
