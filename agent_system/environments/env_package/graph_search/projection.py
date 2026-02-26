@@ -7,7 +7,7 @@ _ACTION_TAG = re.compile(r"<action>", re.IGNORECASE)
 _CHECK_NODE_RE = re.compile(r"^check_node:(\d+)$")
 _CHECK_NODES_RE = re.compile(r"^check_nodes:\[(.*?)\]$")
 _CHECK_GRAPH_RE = re.compile(r"^check_graph:(.+?)$") 
-_PAINT_RE = re.compile(r"^paint:(\d+),\s*(.+)$") 
+_PAINT_RE = re.compile(r"^paint:(.+?),\s*(.+)$")
 
 MAX_NODES_PER_STEP = 5
 VALID_VIEW_MODES = {"1-hop", "2-hop", "sim", "1-hop+sim", "2-hop+sim"}

@@ -57,45 +57,35 @@ class SimpleMemory(BaseMemory):
 
     def fetch(
         self,
-        history_length: int,
-        obs_key: str = "text_obs",
-        action_key: str = "action",
+        obs_key: str = "information",
+        action_key: str = "search",
+        summary_key: str = "summary"
     ) -> Tuple[List[str], List[int]]:
-        """
-        Fetch and format recent interaction history for each environment instance.
-        Args:
-            history_length (int):
-                Maximum number of past steps to retrieve per environment.
-            obs_key (str, default="text_obs"):
-                The key name used to access the observation in stored records.
-                For example: "text_obs" or "Observation", depending on the environment.
-            action_key (str, default="action"):
-                The key name used to access the action in stored records.
-                For example: "action" or "Action".
-        Returns:
-            memory_contexts : List[str]
-                A list of formatted action history strings for each environment.
-            valid_lengths : List[int]
-                A list of the actual number of valid history steps per environment.
-        """
+        
         memory_contexts, valid_lengths = [], []
 
         for env_idx in range(self.batch_size):
-            recent = self._data[env_idx][-history_length:]
-            valid_len = len(recent)
-            start_idx = len(self._data[env_idx]) - valid_len
+            all_history = self._data[env_idx]
+            total_steps = len(all_history)
 
             lines = []
-            for j, rec in enumerate(recent):
-                step_num = start_idx + j + 1
+            for i, rec in enumerate(all_history):
+                step_num = i + 1
                 act = rec[action_key]
-                obs = rec[obs_key]
-                lines.append(
-                    f"[Observation {step_num}: '{obs}', Action {step_num}: '{act}']"
+                disp_summary = rec.get(summary_key, "")
+                # 强制保存完整的 observation
+                disp_obs = str(rec[obs_key])
+
+                block = (
+                    f"=== Step {step_num} ===\n"
+                    f"<summary>{disp_summary}</summary>\n"
+                    f"<action>{act}</action>\n"
+                    f"Observation: {disp_obs}\n"
                 )
+                lines.append(block)
 
             memory_contexts.append("\n".join(lines))
-            valid_lengths.append(valid_len)
+            valid_lengths.append(total_steps)
 
         return memory_contexts, valid_lengths
     

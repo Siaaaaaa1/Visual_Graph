@@ -103,21 +103,16 @@ Rely on topological shapes to prioritize exploration:
 * **High In-Degree Nodes (Upward Triangles ▲):** Hub nodes. Popular applications.
 
 ## 3. The Evidence-Gated Logic Lock & Category Identification
-You CANNOT guess the final answer initially. You must unlock the physical gate by identifying the true semantic categories of the anonymous groups and submitting your classification using the `paint` action.
-* **Major Clusters Rule:** You MUST successfully `paint` the correct category for at least ONE node representing **EACH** of the Major Clusters (Anonymous Groups) listed in your observation gate requirement.
+* **Major Clusters Rule:** You MUST successfully `paint` the correct category for **EACH** of the Major Clusters (Anonymous Groups) listed in your observation gate requirement.
 * **Strict Vocabulary:** You MUST choose the category name for your `paint` and `final` actions strictly from the provided **Candidate Categories** list.
-* **NO IMMEDIATE FEEDBACK:** When you use the `paint` action, the environment will NOT immediately confirm if your semantic mapping is perfectly correct. It will only say "[DELAYED FEEDBACK] Category 'X' painted for Node Y". If you successfully identify and paint the category for at least one node from all required groups using valid logic, the gate will evaluate and unlock.
-* **Optimal Verification Strategy:**
-  1. Use `check_nodes` to autonomously and strategically sample nodes. Keep sampling until you have enough evidence to confidently prove your hypothesis about the cluster's category. 
-  2. Ensure your exploration gathers context that will ALSO help you predict the masked center node's category later.
-  3. Read the sampled texts and find the best matching category from the **Candidate Categories** list before assigning it (`paint`ing).
+* **NO IMMEDIATE FEEDBACK:** When you use the `paint` action, the environment will NOT immediately confirm if your semantic mapping is perfectly correct. It will only say "[DELAYED FEEDBACK] Group 'X' painted...". 
 
 ## 4. Interaction Actions (CRITICAL: MAX 10 Steps)
 You ONLY have 10 steps to complete this task. Efficiency is paramount. Use batching!
 At each step, choose **exactly one** action:
 * **Batch Inspect Text:** `<action>check_nodes:[ID1, ID2, ID3]</action>` (Reveal text of up to 5 nodes at once. USE THIS to save steps!)
 * **Single Inspect Text:** `<action>check_node:ID</action>`
-* **Paint Category:** `<action>paint:ID,Category Name</action>`. Submit your category identification for a node. Choose strictly from Candidate Categories.
+* **Paint Category:** `<action>paint:Group Name,Category Name</action>`. Submit your category identification for an anonymous group. Example: `<action>paint:Group 1,Machine Learning</action>`.
 * **Submit Answer:** `<action>final:Category Name</action>` (Use immediately after the logic gate is unlocked).
 
 ## 5. Response Format
@@ -148,23 +143,22 @@ I will autonomously sample a mix of high-degree Hubs and 1-hop nodes: Blue Nodes
 
 **Step 2: (Hypothesis Proven & Paint Category for Group 1)**
 <think>
-Both Blue nodes (15, 22) consistently discuss algorithms and GNNs. Looking at the Candidate Categories (Machine Learning, Biomolecular Engineering, Data Mining), "Machine Learning" is the perfect semantic match for Blue 'Group 1'.
-Both Red nodes (8, 30) discuss Bioinformatics and Molecules, which maps perfectly to "Biomolecular Engineering" from the candidates. This context will be crucial for the center node.
-I will fulfill the Group 1 requirement by painting the category 'Machine Learning' for Blue Node 15.
+Both Blue nodes (15, 22) consistently discuss algorithms and GNNs. Looking at the Candidate Categories, "Machine Learning" is the perfect semantic match for 'Group 1'.
+I will fulfill the Group 1 requirement by painting the category 'Machine Learning' for Group 1.
 </think>
-<summary>Evidence is sufficient: Group 1 maps to Machine Learning, and Group 2 maps to Biomolecular Engineering based on the Candidate list. Painting the 'Machine Learning' category for Node 15 to satisfy the Group 1 requirement.</summary>
-<action>paint:15,Machine Learning</action>
+<summary>Evidence is sufficient: Group 1 maps to Machine Learning. Painting the 'Machine Learning' category for Group 1 to satisfy the requirement.</summary>
+<action>paint:Group 1,Machine Learning</action>
 
-**Observation:** [DELAYED FEEDBACK] Category 'Machine Learning' painted for Node 15. Correctness hidden. Legend updated.
+**Observation:** [DELAYED FEEDBACK] Group 1 painted as 'Machine Learning'. Correctness hidden. Legend updated.
 
 **Step 3: (Paint Category for Group 2)**
 <think>
-Group 1 requirement met. Now I must paint the category for Group 2 (Red). My evidence already confirmed it is Biomolecular Engineering. I will submit this identification for Node 8.
+Group 1 requirement met. Now I must paint the category for Group 2. My evidence confirmed it is Biomolecular Engineering.
 </think>
-<summary>Group 1 fulfilled. Now painting the verified 'Biomolecular Engineering' category for Red Node 8 to fulfill the Group 2 unlocking quota.</summary>
-<action>paint:8,Biomolecular Engineering</action>
+<summary>Group 1 fulfilled. Now painting the verified 'Biomolecular Engineering' category for Group 2 to fulfill the quota.</summary>
+<action>paint:Group 2,Biomolecular Engineering</action>
 
-**Observation:** [DELAYED FEEDBACK] Category 'Biomolecular Engineering' painted for Node 8. Correctness hidden. Gate UNLOCKED.
+**Observation:** [DELAYED FEEDBACK] Group 2 painted as 'Biomolecular Engineering'. Correctness hidden. Gate UNLOCKED.
 
 **Step 4: (Check Center & Finalize)**
 <think>
@@ -375,7 +369,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
 
         if not init:
             memory_ctx, _ = self.memory.fetch(
-                self.config.env.history_length,
                 obs_key="information",
                 action_key="search",
                 summary_key="summary"

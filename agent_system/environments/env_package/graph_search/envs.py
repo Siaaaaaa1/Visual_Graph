@@ -42,7 +42,7 @@ class GraphSearchEnv:
         self.current_image = None
         self.episode_color_seed = random.randint(0, 1000000)
         self.paint_history = {} 
-        self.painted_nodes = {} 
+        self.painted_groups = {}
         self.mode = "System1"
         self.required_classes = set()
         self.anon_map = {}
@@ -166,9 +166,9 @@ class GraphSearchEnv:
             req_groups = sorted([self.anon_map[tc] for tc in self.required_classes])
             
             if req_groups:
-                gate_instruction = f"🚨 GATE REQUIREMENT: You must correctly paint at least ONE node from EACH of these Major Clusters: [{', '.join(req_groups)}]. (Groups <10% or beyond top 4 are ignored)."
+                gate_instruction = f"🚨 GATE REQUIREMENT: You must correctly paint EACH of these Major Clusters: [{', '.join(req_groups)}]. (Groups <10% or beyond top 4 are ignored)."
             else:
-                gate_instruction = f"🚨 GATE REQUIREMENT: Highly fragmented graph. Paint ANY 1 correct node to unlock the gate."
+                gate_instruction = f"🚨 GATE REQUIREMENT: Highly fragmented graph. Paint ANY 1 correct Group to unlock the gate."
 
         stats = self.visualizer.get_node_degree_info(self.center_id)
         
@@ -186,7 +186,7 @@ class GraphSearchEnv:
             max_nodes=init_max_nodes,
             color_seed=self.episode_color_seed,
             mask_neighbors=mask_neighbors_init,
-            painted_nodes=self.painted_nodes,
+            painted_nodes={}, # 【修改】传空字典
             color_mapping=self.color_mapping,
             anon_map=self.anon_map
         )
@@ -304,31 +304,54 @@ class GraphSearchEnv:
             else:
                 try:
                     parts = current_action.split(":", 1)[1].split(",", 1)
-                    nid, cls = int(parts[0].strip()), parts[1].strip()
-                    if nid not in self.painted_nodes:
-                        self.paint_history[self.step_count] = (nid, cls)
-                        self.painted_nodes[nid] = cls
-                        obs = f"[DELAYED FEEDBACK] Node {nid} painted as '{cls}'. Map updated. Correctness hidden."
-                        
-                        gt_cls = self.visualizer._get_node_info(nid)["true_class"]
-                        # 【核心修正】：正确涂色给奖励，错误涂色给惩罚
-                        if cls.lower() == gt_cls.lower():
-                            reward = 0.1
-                        else:
-                            reward = -0.1
-                    else:
-                        obs = f"[INVALID] Node {nid} is already painted. Prevent Farming constraint triggered."
-                        reward = -0.1 
+                    target_group = parts[0].strip()
+                    cls = parts[1].strip()
                     
-                    img_bytes, legend_dict = self.visualizer.draw_subgraph(
-                        self.center_id, view_mode="2-hop+sim", max_nodes=30, 
-                        color_seed=self.episode_color_seed, mask_neighbors=True, painted_nodes=self.painted_nodes,
-                        color_mapping=self.color_mapping, anon_map=self.anon_map
-                    )
-                    self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024)))
+                    # 匹配用户传入的 Group 是否有效
+                    valid_group = None
+                    gt_cls = None
+                    for tc, anon in self.anon_map.items():
+                        if anon.lower() == target_group.lower():
+                            valid_group = anon
+                            gt_cls = tc
+                            break
+                            
+                    if valid_group:
+                        if valid_group not in self.painted_groups:
+                            self.paint_history[self.step_count] = (valid_group, cls)
+                            self.painted_groups[valid_group] = cls
+                            obs = f"[DELAYED FEEDBACK] {valid_group} painted as '{cls}'. Map updated. Correctness hidden."
+                            
+                            # 对错奖励判断
+                            if cls.lower() == gt_cls.lower():
+                                reward = 0.1
+                            else:
+                                reward = -0.1
+                        else:
+                            obs = f"[INVALID] {valid_group} is already painted. Prevent Farming constraint triggered."
+                            reward = -0.1 
+                    else:
+                        obs = f"Invalid group name '{target_group}'. Please use names like 'Group 1'."
+                        reward = -0.1
+
+                    # 【核心】不再调用 draw_subgraph 重新画图，直接在纯文本中更新 Legend
+                    legend_dict = {}
+                    for tc, c_conf in self.color_mapping.items():
+                        color_name = c_conf["name"]
+                        if self.mode == "System2":
+                            anon_name = self.anon_map.get(tc, "Unknown Group")
+                            if anon_name in self.painted_groups:
+                                pred_class = self.painted_groups[anon_name]
+                                legend_dict[color_name] = f"Painted: {pred_class}"
+                            else:
+                                legend_dict[color_name] = f"Anonymous: {anon_name}"
+                        else:
+                            legend_dict[color_name] = tc
+                    
                     obs += f"\nLegend: {self._format_legend(legend_dict)}"
+
                 except Exception:
-                    obs = "Invalid paint format. Use paint:ID,Category"
+                    obs = "Invalid paint format. Use paint:Group Name,Category"
                     reward = -0.1
 
         elif current_action.startswith("check_graph:"):
@@ -364,11 +387,13 @@ class GraphSearchEnv:
                     reward = 1.0 if is_correct else -1.0
                     obs = "System 1 Final answer submitted."
                 else:
-                    # 解除硬性字符串匹配，只要该节点存在被提交 paint 操作即满足条件
+                    # 获取已经被涂色的所有底层真实类别
                     painted_tcs = set()
-                    for p_nid, p_cls in self.paint_history.values():
-                        gt_cls = self.visualizer._get_node_info(p_nid)["true_class"]
-                        painted_tcs.add(gt_cls)
+                    for grp in self.painted_groups.keys():
+                        for tc, anon in self.anon_map.items():
+                            if anon == grp:
+                                painted_tcs.add(tc)
+                                break
                     
                     if len(self.required_classes) == 0:
                         is_unlocked = len(painted_tcs) >= 1
@@ -387,15 +412,14 @@ class GraphSearchEnv:
                             obs = f"Gate UNLOCKED. Final answer WRONG."
                     else:
                         done = False
-                        # 强行提交门没开的逻辑扣分
                         reward = -0.1 
                         missing_classes = self.required_classes - painted_tcs
                         if len(self.required_classes) == 0:
-                            missing_str = "ANY 1 correct node"
+                            missing_str = "ANY 1 correct Group"
                         else:
                             missing_groups = sorted([self.anon_map[tc] for tc in missing_classes])
                             missing_str = ", ".join(missing_groups)
-                        obs = f"Action Failed: Logic Gate Locked. You still need to paint at least ONE node from: [{missing_str}]."
+                        obs = f"Action Failed: Logic Gate Locked. You still need to paint: [{missing_str}]."
             except Exception:
                 obs = "Invalid submit format."
                 reward = -0.1
