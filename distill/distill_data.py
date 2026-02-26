@@ -15,11 +15,21 @@ from concurrent.futures import ThreadPoolExecutor
 import re
 import random
 
-# ================= 路径动态挂载 =================
-sys.path.append("agent_system/environments/env_package")
+# ================= 路径动态挂载与组件导入 =================
+# 将项目根目录加入环境变量，确保能顺利导入 agent_system 下的所有模块
+sys.path.insert(0, os.path.abspath("."))
 
-from graph_search.envs import GraphSearchEnv
-from graph_search.graph_visualizer import GraphVisualizer
+# 根据真实目录结构导入组件
+from agent_system.memory import FullSequenceSearchMemory
+from agent_system.environments.env_package.graph_search.envs import GraphSearchEnv
+from agent_system.environments.env_package.graph_search.graph_visualizer import GraphVisualizer
+
+# 导入 RL 环境管理器中一模一样的 Prompt 模板
+from agent_system.environments.env_manager_graph_search import (
+    SYSTEM1_TASK_INSTRUCTION, SYSTEM1_FEW_SHOT,
+    SYSTEM2_TASK_INSTRUCTION, SYSTEM2_FEW_SHOT,
+    TEMPLATE_NO_HIS, TEMPLATE_WITH_HIS
+)
 
 # ================= 配置与日志 =================
 parser = argparse.ArgumentParser()
@@ -34,16 +44,20 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(f"distill/distill_{args.dataset}.log", mode='a'), # 改为追加模式
+        logging.FileHandler(f"distill/distill_{args.dataset}.log", mode='a'),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
 
-# 使用 8080 端口
 API_URL = "http://localhost:8080/v1/chat/completions"
-MAX_CONCURRENT_REQUESTS = 32  # 压榨 GPU 的核心并发数控制
-MAX_RETRIES = 10               # 10次未成功则丢弃
+MAX_CONCURRENT_REQUESTS = 32   # GPU 并发数
+MAX_RETRIES = 10               # 最大重试次数
+HISTORY_LENGTH = 10            # 记忆追溯长度
+
+# ================= 预编译正则 =================
+SUMMARY_PATTERN = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
+ACTION_PATTERN = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
 
 # ================= CPU 密集型辅助函数 =================
 def ndarray_to_bytes(img_array: np.ndarray) -> bytes:
@@ -107,10 +121,8 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "stop": ["</action>"]
     }
     async with sem:
-        # 【核心修复1】全方位放宽超时限制：整体1小时，连接5分钟，单次读取1小时
         timeout = aiohttp.ClientTimeout(total=3600, connect=300, sock_read=3600)
         async with session.post(API_URL, json=payload, timeout=timeout) as response:
-            # 【核心修复2】捕获非200的报错文本，便于暴露如超长上下文(HTTP 400)等问题
             if response.status != 200:
                 error_text = await response.text()
                 raise RuntimeError(f"HTTP {response.status}: {error_text}")
@@ -118,7 +130,7 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
             data = await response.json()
             return data["choices"][0]["message"]["content"] + "</action>"
 
-# ================= 单个任务并发执行逻辑 =================
+# ================= 单个任务并发执行逻辑 (完全复刻 RL Env Manager) =================
 async def run_task_async(task, text_db, shared_payload, session, sem, executor):
     tid = task["center_id"]
     successful_trajectories = []
@@ -131,6 +143,10 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
             current_temp = min(0.6 + (attempt * 0.04), 1.0)
             tau_val = random.choice([0.2, 0.4, 0.6])
             
+            # 初始化 Memory (每次尝试均重置)
+            memory = FullSequenceSearchMemory()
+            memory.reset(batch_size=1)
+            
             env = await loop.run_in_executor(
                 executor, 
                 lambda: GraphSearchEnv(
@@ -140,48 +156,96 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor):
             )
             obs_text, obs_img, info = await loop.run_in_executor(executor, env.reset, task)
             
+            # 保存初始状态给 Prompt 模板用
+            initial_state = obs_text 
             raw_traj = []
-            msgs = [{"role": "system", "content": "You are a graph reasoning expert. Think step-by-step in <think> tags and act in <action> tags."}]
             
             step_count, process_rewards, final_reward = 0, 0.0, 0.0
             done = False
             api_error = False
             
             while not done:
-                user_content = [{"type": "text", "text": obs_text}]
-                traj_user_content = [{"type": "text", "text": obs_text}]
+                # 1. 判断并获取对应的任务指令和 few shot
+                mode = info["mode"]
+                task_inst = SYSTEM1_TASK_INSTRUCTION if mode == "System1" else SYSTEM2_TASK_INSTRUCTION
+                few_shot = SYSTEM1_FEW_SHOT if mode == "System1" else SYSTEM2_FEW_SHOT
+                
+                # 2. 完全模拟 RL 的 Prompt 构建逻辑
+                if step_count == 0:
+                    prompt_text = TEMPLATE_NO_HIS.format(
+                        task_instruction=task_inst,
+                        few_shot=few_shot,
+                        initial_state=initial_state
+                    )
+                else:
+                    memory_ctx, _ = memory.fetch(
+                        HISTORY_LENGTH,
+                        obs_key="information",
+                        action_key="search",
+                        summary_key="summary"
+                    )
+                    prompt_text = TEMPLATE_WITH_HIS.format(
+                        task_instruction=task_inst,
+                        few_shot=few_shot,
+                        initial_state=initial_state,
+                        memory_context=memory_ctx[0],
+                        step_count=step_count + 1
+                    )
+                
+                # 3. 构造真正的 API Message
+                # 此处 user_content 仅包含本轮拼接好的大段文本（内含纯文本历史记录）以及唯一的一张最新图
+                user_content = [{"type": "text", "text": prompt_text}]
                 
                 if obs_img is not None:
                     b64_img = await loop.run_in_executor(executor, img_to_b64, obs_img)
-                    user_content.insert(0, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
-                    traj_user_content.append({"type": "image", "base64": b64_img})
+                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
 
-                msgs.append({"role": "user", "content": user_content})
-                raw_traj.append({"role": "user", "content": traj_user_content})
+                # API 调用永远是单轮请求，彻底斩断历史图片堆积导致的 HTTP 400 OOM 风险
+                api_msgs = [{"role": "user", "content": user_content}]
                 
                 try:
-                    ans_text = await fetch_completion(session, msgs, current_temp, sem)
+                    ans_text = await fetch_completion(session, api_msgs, current_temp, sem)
                 except Exception as e:
-                    # 【核心修复3】使用 repr 强制解析对象，避免 TimeoutError 打出空字符串
                     err_msg = repr(e)
                     logger.error(f"Task {tid} API Error on attempt {attempt+1}: {err_msg}")
                     api_error = True
                     break
 
-                msgs.append({"role": "assistant", "content": ans_text})
-                raw_traj.append({"role": "assistant", "content": ans_text})
+                # 4. 解析模型的返回内容
+                s_match = SUMMARY_PATTERN.search(ans_text)
+                summary = s_match.group(1).strip() if s_match else "No summary provided."
                 
-                action_match = re.search(r"<action>(.*?)</action>", ans_text, re.S | re.I)
+                action_match = ACTION_PATTERN.search(ans_text)
                 action_str = action_match.group(1).strip() if action_match else "ERROR"
                 
-                obs_text, obs_img, r, done, s_info = await loop.run_in_executor(executor, env.step, action_str)
+                # 5. 环境前进一步，获取反馈
+                next_obs_text, next_obs_img, r, done, s_info = await loop.run_in_executor(executor, env.step, action_str)
+                
+                # 6. 将操作存入 Memory，供下一轮使用
+                memory.store({
+                    "search": [action_str],
+                    "information": [next_obs_text],
+                    "summary": [summary]
+                })
+                
+                # 7. 存入专门供 SFT 使用的 Trajectory (单轮格式，文本已包含完整上下文)
+                raw_traj.append({
+                    "messages": [{"role": "user", "content": user_content}],
+                    "target": {"role": "assistant", "content": ans_text}
+                })
+                
+                # 更新循环变量
+                obs_text = next_obs_text
+                obs_img = next_obs_img
                 step_count += 1
                 if 0 < r < 1.0: process_rewards += r
                 if done: final_reward = r
 
             if api_error:
+                await asyncio.sleep(2)
                 continue
 
+            # ================= 质量门控 =================
             is_valid = True
             if final_reward < 1.0 or step_count > 8: is_valid = False
             if info["mode"] == "System2" and process_rewards <= 0: is_valid = False
@@ -255,11 +319,11 @@ async def main_async():
                                 f_stats.write(json.dumps(stats_record) + "\n")
                                 
                                 t_seq = res["traj"]
-                                for i in range(0, len(t_seq), 2):
+                                # 写入 SFT 格式
+                                for step_data in t_seq:
                                     train_record = {
                                         "dataset": args.dataset,
-                                        "messages": t_seq[:i+1],
-                                        "target": t_seq[i+1]
+                                        "messages": step_data["messages"] + [step_data["target"]]
                                     }
                                     f_data.write(json.dumps(train_record) + "\n")
                                 
