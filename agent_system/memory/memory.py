@@ -182,8 +182,8 @@ class FullSequenceSearchMemory(BaseMemory):
     2. Always includes full 'Summary' and 'Action' for every step.
     3. Includes full 'Observation' ONLY for the last `history_length` steps.
        For older steps, 'Observation' is replaced by a placeholder to save tokens.
-    4. Truncates 'Summary' to max_summary_len (default 300 chars).
-    5. Truncates 'Observation' to max_obs_len (default 800 chars).
+    4. Truncates 'Summary' to max_summary_len.
+    5. Truncates 'Observation' to max_obs_len.
     """
     def __init__(self):
         self._data = None
@@ -215,8 +215,8 @@ class FullSequenceSearchMemory(BaseMemory):
         obs_key: str,
         action_key: str,
         summary_key: str = "summary",
-        max_summary_len: int = 300,  # Summary 限制 300
-        max_obs_len: int = 800       # Observation 限制 800
+        max_summary_len: int = 1500,  # [核心修改]：放宽截断限制到 1500
+        max_obs_len: int = 8000       # [核心修改]：放宽截断限制到 8000，保障多节点读取
     ) -> Tuple[List[str], List[int]]:
         
         memory_contexts, valid_lengths = [], []
@@ -234,7 +234,7 @@ class FullSequenceSearchMemory(BaseMemory):
                 # --- [Summary 处理] ---
                 raw_summary = rec.get(summary_key, "")
                 if raw_summary and len(raw_summary) > max_summary_len:
-                    disp_summary = raw_summary[:max_summary_len] + "..."
+                    disp_summary = raw_summary[:max_summary_len] + "...(truncated summary)"
                 else:
                     disp_summary = raw_summary
 
@@ -243,7 +243,7 @@ class FullSequenceSearchMemory(BaseMemory):
                     # 即使是显示的 observation，也要进行截断检查
                     raw_obs = str(rec[obs_key]) # 确保是字符串
                     if len(raw_obs) > max_obs_len:
-                        disp_obs = raw_obs[:max_obs_len] + "...(truncated)"
+                        disp_obs = raw_obs[:max_obs_len] + "...(truncated obs)"
                     else:
                         disp_obs = raw_obs
                     

@@ -15,12 +15,12 @@ ENGINE=${1:-vllm}
 num_cpus_per_env_worker=1.0
 
 # --- H20 优化参数 ---
-train_data_size=32
+train_data_size=64          # 【修改】从 32 提升至 64，扩大 rollout 总量
 val_data_size=256
 group_size=8
-MODEL_PATH="./models/Qwen3-VL-4B-Thinking"
+MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
 
-ppo_mini_batch_size=1024
+ppo_mini_batch_size=256     # 【修改】从 1024 降至 256，解决与总生成量（64*8=512）的逻辑冲突
 # 保持为 2，这是训练时的 batch
 micro_batch_size=2
 
@@ -72,13 +72,13 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='right' \
     data.return_raw_chat=True \
     actor_rollout_ref.model.path=$MODEL_PATH \
-    actor_rollout_ref.actor.optim.lr=1e-6 \
+    actor_rollout_ref.actor.optim.lr=2e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.model.use_fused_kernels=False \
     actor_rollout_ref.actor.ppo_mini_batch_size=$ppo_mini_batch_size \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=$micro_batch_size \
-    actor_rollout_ref.actor.entropy_coeff=0.0 \
-    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.entropy_coeff=0.01 \
+    actor_rollout_ref.actor.use_kl_loss=True \
     actor_rollout_ref.actor.kl_loss_coef=0.01 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
@@ -99,7 +99,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
-    algorithm.use_kl_in_reward=False \
+    algorithm.use_kl_in_reward=True \
     env.env_name=graph_search/GraphSearchEnv \
     env.seed=42 \
     env.max_steps=10 \

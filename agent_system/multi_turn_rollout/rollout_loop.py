@@ -396,14 +396,16 @@ class TrajectoryCollector:
                                  img_info = f"Pixel Values Shape: {pv.shape}"
                 
                 print(f"[Input Stats] Text Len: {valid_input_len} | Image Info: {img_info}")
-                print(f"[Input Prompt] (Start): {input_prompts[i][:200]} ...")
-                print(f"[Input Prompt] (End): ... {input_prompts[i][-500:]}")
+                
+                # [核心修复]：完整无截断打印发送给模型的 Prompt
+                print(f"\n[Input Prompt (Full)]:\n{input_prompts[i]}")
                 
                 if truncation_flags[i]:
-                    print(f"\n[!!! WARNING: TRUNCATED !!!]")
+                    print(f"\n[!!! WARNING: PROMPT TRUNCATED !!!]")
                     print(f"[Truncated Content]: {truncated_texts[i]}")
                 
                 response_text = text_actions[i]
+                # [核心修复]：完整打印模型返回
                 print(f"\n[Full Model Response]:\n{response_text}")
 
                 think = "N/A"
@@ -427,12 +429,14 @@ class TrajectoryCollector:
                     action = m.group(1).strip() if m else "Not Found"
 
                 print(f"\n[Parsed Structure]")
-                print(f"  > Think: {think[:300]}..." if len(str(think)) > 300 else f"  > Think: {think}")
+                # [核心修复]：取消 Think 打印长度的限制
+                print(f"  > Think: {think}")
                 print(f"  > Summary: {summary}")
                 print(f"  > Action: {action}")
 
-                feedback = next_obs['text'][i]
-                print(f"\n[Environment Feedback]:\n{feedback[:1000]}..." if len(feedback) > 1000 else f"\n[Environment Feedback]:\n{feedback}")
+                # [核心修复]：打印真正的单步执行结果 (Raw Env Feedback)，而不是把下一个完整 Prompt 打印出来
+                raw_env_feedback = next_obs['anchor'][i]
+                print(f"\n[Raw Env Feedback (Result of executed action)]:\n{raw_env_feedback}")
                 print("-" * 60)
 
             if len(rewards.shape) == 2:
