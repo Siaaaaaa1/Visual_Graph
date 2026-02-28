@@ -364,8 +364,7 @@ class GraphSearchEnv:
                     v_mode, max_n = params[0].strip(), int(params[1].strip())
                     img_bytes, legend_dict = self.visualizer.draw_subgraph(
                         self.center_id, view_mode=v_mode, max_nodes=max_n, 
-                        color_seed=self.episode_color_seed, mask_neighbors=True, 
-                        painted_nodes={}, # 修复：直接传入空字典
+                        color_seed=self.episode_color_seed, mask_neighbors=True, painted_nodes=self.painted_nodes,
                         color_mapping=self.color_mapping, anon_map=self.anon_map
                     )
                     self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024)))
@@ -375,7 +374,7 @@ class GraphSearchEnv:
                 except Exception:
                     obs = "Invalid check_graph format."
                     reward = -0.1
-                    
+
         elif current_action.startswith("final:") or current_action.startswith("submit:"):
             try:
                 pred = current_action.split(":", 1)[1].strip()

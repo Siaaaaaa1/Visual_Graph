@@ -1,7 +1,7 @@
 from verl import DataProto
 import torch
 import numpy as np
-import re
+import re  # 新增引用
 
 class EpisodeRewardManager:
     """The reward manager.
@@ -20,6 +20,7 @@ class EpisodeRewardManager:
     def __call__(self, data: DataProto, return_dict=False):
         """We will expand this function gradually based on the available datasets"""
 
+        # If there is rm score, we directly return rm score. Otherwise, we compute via rm_score_fn
         if "rm_scores" in data.batch.keys():
             if return_dict:
                 return {"reward_tensor": data.batch["rm_scores"]}
@@ -30,7 +31,7 @@ class EpisodeRewardManager:
 
         already_print_data_sources = {}
         
-        # [防刷分机制]：只设定惩罚项
+        # [防刷分机制]：只设定惩罚项，不设正向格式奖励。
         FORMAT_PENALTY_COEF = -0.2 
 
         for i in range(len(data)):
@@ -50,30 +51,30 @@ class EpisodeRewardManager:
 
             data_source = data_item.non_tensor_batch['data_source']
 
-            # =========================================================
-            # [核心修改]：绝对过滤与多轮 GRPO 优势奖励整合逻辑
-            # =========================================================
+            # --- [核心修改]：绝对过滤逻辑执行 ---
+            # 检查来自 rollout_loop.py 的绝对过滤标记
             is_filtered = data_item.non_tensor_batch.get('is_filtered', False)
             
             if is_filtered:
+                # 如果被过滤，强制设为 0，不进行任何奖励或惩罚计算
                 score = 0.0
             else:
-                episode_rewards = data_item.non_tensor_batch.get('episode_rewards', 0.0)
+                episode_rewards = data_item.non_tensor_batch['episode_rewards']
+                episode_lengths = data_item.non_tensor_batch['episode_lengths']
+
+                # 优先读取单步事后分配的真实 Reward
                 step_reward = data_item.non_tensor_batch.get('step_reward', episode_rewards)
-                
-                # 获取在 rollout_loop 中计算的轨迹级别 GRPO Advantage
-                traj_advantage = data_item.non_tensor_batch.get('traj_advantage', 0.0)
 
+                # 计算基础分数
                 if self.normalize_by_length:
-                    step_reward = step_reward / data_item.non_tensor_batch.get('episode_lengths', 1)
-
-                # 核心合并：将组内相对优势叠加单步 reward 分发给 Token
-                score = traj_advantage + step_reward
+                    score = step_reward / episode_lengths
+                else:
+                    score = step_reward
                 
-            # 格式惩罚必须全局强制生效（过滤样本已被抹平，此处仅对正常样本强制惩罚）
-            if not is_filtered and not self.format_pattern.search(response_str):
-                score += FORMAT_PENALTY_COEF
-            # =========================================================
+                # 只有非过滤样本才进行格式校验和惩罚
+                if not self.format_pattern.search(response_str):
+                    score += FORMAT_PENALTY_COEF 
+            # ---------------------------------
 
             reward_tensor[i, valid_response_length - 1] = torch.tensor(score, dtype=torch.float32, device=prompt_ids.device)
 

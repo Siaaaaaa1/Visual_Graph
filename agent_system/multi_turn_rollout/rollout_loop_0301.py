@@ -44,10 +44,15 @@ class TrajectoryCollector:
         obs: Dict,
         step: int = 0,
     ):
+        """
+        Process a single observation sample.
+        """
+
         raw_prompt = gen_batch.non_tensor_batch['raw_prompt'][item]
         data_source = gen_batch.non_tensor_batch['data_source'][item]
         apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
         
+        # Get observation components
         obs_texts = obs.get('text', None)
         obs_images = obs.get('image', None)
         obs_anchors = obs.get('anchor', None)
@@ -58,6 +63,7 @@ class TrajectoryCollector:
 
         _obs_anchor = torch_to_numpy(obs_anchor, is_object=True) if isinstance(obs_anchor, torch.Tensor) else obs_anchor
 
+        # --- 图片可视化抽样保存逻辑 ---
         if is_multi_modal and step > 0 and np.random.random() < 0.01:
             try:
                 debug_dir = os.path.join(os.getcwd(), 'debug_images')
@@ -77,16 +83,22 @@ class TrajectoryCollector:
                     print(f"[Debug] Saved sampled image (Step {step}) to {save_path}")
             except Exception as e:
                 print(f"[Warning] Failed to save debug image: {e}")
+        # -----------------------------------
 
-        # =========================================================
-        # [NEW] 兼容原生多轮对话格式
-        # =========================================================
-        if isinstance(obs_text, list):
-            chat = obs_text
+        # Build chat structure
+        obs_content = ''
+        if obs_text is not None:
+            obs_content += obs_text
         else:
-            obs_content = obs_text if obs_text is not None else ""
-            chat = [{"content": obs_content, "role": "user"}]
+            print(f"Warning: No text observation found!")
+
         
+        chat = np.array([{
+            "content": obs_content,
+            "role": "user",
+        }])
+        
+        # Apply chat template
         prompt_with_chat_template = self.tokenizer.apply_chat_template(
             chat,
             add_generation_prompt=True,
@@ -94,9 +106,12 @@ class TrajectoryCollector:
             **apply_chat_template_kwargs
         )
         
+        # Initialize return dict
         row_dict = {}
         
+        # Process multimodal data
         if is_multi_modal:
+            # Replace image placeholder with vision tokens
             raw_prompt = prompt_with_chat_template.replace('<image>', '<|vision_start|><|image_pad|><|vision_end|>')
             row_dict['multi_modal_data'] = {'image': [process_image(obs_image)]}
             image_inputs = self.processor.image_processor(row_dict['multi_modal_data']['image'], return_tensors='pt')
@@ -146,6 +161,7 @@ class TrajectoryCollector:
         else:
             position_ids = compute_position_id_with_mask(attention_mask)
 
+        # --- 截断内容捕获逻辑 ---
         raw_prompt_ids = self.tokenizer.encode(raw_prompt, add_special_tokens=False)
         original_len = len(raw_prompt_ids)
         truncated_text = ""
@@ -170,6 +186,7 @@ class TrajectoryCollector:
             if is_truncated and truncated_ids:
                 truncated_text = self.tokenizer.decode(truncated_ids, skip_special_tokens=False)
 
+        # Build final output dict
         row_dict.update({
             'input_ids': input_ids[0],
             'attention_mask': attention_mask[0],
@@ -184,8 +201,7 @@ class TrajectoryCollector:
         })
 
         if self.config.data.get('return_raw_chat', False):
-            # [NEW] 修复原生 list 没有 tolist 属性的报错
-            row_dict['raw_prompt'] = chat.tolist() if hasattr(chat, 'tolist') else chat
+            row_dict['raw_prompt'] = chat.tolist()
         
         return row_dict
 
@@ -195,6 +211,9 @@ class TrajectoryCollector:
         obs: Dict,
         step: int = 0,
     ) -> DataProto:
+        """
+        Process a batch of observation samples.
+        """
         batch_size = len(gen_batch.batch['input_ids'])
         processed_samples = []
         
@@ -226,6 +245,9 @@ class TrajectoryCollector:
             traj_uid: np.ndarray,
             tool_callings: np.ndarray,
             ) -> DataProto:
+        """
+        Collect and organize trajectory data.
+        """
         batch_size = len(total_batch_list)
 
         success_rate = {}
@@ -241,6 +263,7 @@ class TrajectoryCollector:
                     data['episode_lengths'] = episode_lengths[bs]
                     data['tool_callings'] = tool_callings[bs]
                     
+                    # [Ada-Fog 核心增强]：确保事后单步奖励 (step_reward) 被安全继承
                     if 'step_reward' not in data:
                         data['step_reward'] = float(data.get('rewards', 0.0))
                         
@@ -260,6 +283,9 @@ class TrajectoryCollector:
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
             ) -> DataProto:
+        """
+        Collects trajectories through parallel agent-environment loop.
+        """
 
         batch_size = len(gen_batch.batch)
 
@@ -324,6 +350,7 @@ class TrajectoryCollector:
             batch_input.meta_info = gen_batch.meta_info
             batch_input_padded, pad_size = pad_dataproto_to_divisor(batch_input, actor_rollout_wg.world_size)
             
+            # --- Model Interaction ---
             model_start_time = time.time()
             batch_output_padded = actor_rollout_wg.generate_sequences(batch_input_padded)
             batch_output = unpad_dataproto(batch_output_padded, pad_size=pad_size)
@@ -336,6 +363,7 @@ class TrajectoryCollector:
             text_actions = self.tokenizer.batch_decode(batch.batch['responses'], skip_special_tokens=True)
             batch.non_tensor_batch['model_response_text'] = np.array(text_actions, dtype=object)
 
+            # --- Env Interaction ---
             env_start_time = time.time()
             next_obs, rewards, dones, infos = envs.step(text_actions)
             env_duration = time.time() - env_start_time
@@ -369,6 +397,7 @@ class TrajectoryCollector:
                 
                 print(f"[Input Stats] Text Len: {valid_input_len} | Image Info: {img_info}")
                 
+                # [核心修复]：完整无截断打印发送给模型的 Prompt
                 print(f"\n[Input Prompt (Full)]:\n{input_prompts[i]}")
                 
                 if truncation_flags[i]:
@@ -376,6 +405,7 @@ class TrajectoryCollector:
                     print(f"[Truncated Content]: {truncated_texts[i]}")
                 
                 response_text = text_actions[i]
+                # [核心修复]：完整打印模型返回
                 print(f"\n[Full Model Response]:\n{response_text}")
 
                 think = "N/A"
@@ -399,10 +429,12 @@ class TrajectoryCollector:
                     action = m.group(1).strip() if m else "Not Found"
 
                 print(f"\n[Parsed Structure]")
+                # [核心修复]：取消 Think 打印长度的限制
                 print(f"  > Think: {think}")
                 print(f"  > Summary: {summary}")
                 print(f"  > Action: {action}")
 
+                # [核心修复]：打印真正的单步执行结果 (Raw Env Feedback)，而不是把下一个完整 Prompt 打印出来
                 raw_env_feedback = next_obs['anchor'][i]
                 print(f"\n[Raw Env Feedback (Result of executed action)]:\n{raw_env_feedback}")
                 print("-" * 60)
@@ -433,11 +465,13 @@ class TrajectoryCollector:
             
             batch_list: list[dict] = to_list_of_dict(batch)
 
+            # --- 保存每一步的基础状态 ---
             for i in range(batch_size):
                 batch_list[i]['step_reward'] = float(rewards[i] if np.isscalar(rewards[i]) else rewards[i].item())
                 total_batch_list[i].append(batch_list[i])
                 total_infos[i].append(infos[i])
 
+            # --- [核心更新]: 捕获终局信号，执行事后信用分配 ---
             is_done_prev = is_done.copy()
             is_done = np.logical_or(is_done, dones)
             
@@ -449,6 +483,7 @@ class TrajectoryCollector:
                     for step_idx, step_dict in enumerate(valid_steps):
                         if step_idx < len(hr):
                             step_dict['step_reward'] = float(hr[step_idx])
+            # --------------------------------------------------
 
             obs = next_obs
 
@@ -471,6 +506,9 @@ class TrajectoryCollector:
             actor_rollout_wg, 
             envs: EnvironmentManagerBase,
             ) -> DataProto:
+        """
+        Conduct dynamic rollouts until a target batch size is met. 
+        """
         total_batch_list = []
         total_episode_rewards = []
         total_episode_lengths = []
@@ -516,6 +554,9 @@ class TrajectoryCollector:
 
         return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
 
+    # ==========================================================
+    # [NEW] GRPO Advantage Analytics Logger
+    # ==========================================================
     def compute_and_log_grpo_advantages(self, rewards: torch.Tensor, env_modes: list, group_size: int):
         if rewards.dim() == 1:
             if rewards.shape[0] % group_size != 0:
@@ -527,15 +568,18 @@ class TrajectoryCollector:
 
         batch_size = rewards_2d.shape[0]
         
+        # 1. 计算 GRPO 组内均值与标准差
         group_mean = rewards_2d.mean(dim=-1, keepdim=True)
         group_std = rewards_2d.std(dim=-1, keepdim=True)
         
+        # 2. 计算 Advantage (标准归一化，方差过小置 0)
         advantages = torch.where(
             group_std > 1e-6,
             (rewards_2d - group_mean) / (group_std + 1e-8),
             torch.zeros_like(rewards_2d)
         )
 
+        # 3. 统计核心指标
         dead_groups = (group_std.squeeze(-1) <= 1e-6).sum().item()
         vanishing_ratio = dead_groups / batch_size if batch_size > 0 else 0
 
@@ -550,7 +594,7 @@ class TrajectoryCollector:
         print(f"🔹 Vanishing Ratio: {vanishing_ratio:.1%} ({dead_groups}/{batch_size} zero-variance groups)")
         print("-" * 50)
         
-        show_batches = min(6, batch_size) 
+        show_batches = min(6, batch_size) # 打印前 6 个组的细节以供观测
         
         for i in range(show_batches):
             r_group = rewards_2d[i].cpu().numpy()
@@ -574,6 +618,9 @@ class TrajectoryCollector:
             envs: EnvironmentManagerBase,
             is_train: bool = True,
             ) -> DataProto:
+        """
+        Select and run the appropriate rollout loop.
+        """
         if is_train:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
             
@@ -587,18 +634,17 @@ class TrajectoryCollector:
         assert len(total_batch_list) == len(total_episode_rewards)
 
         # =========================================================
-        # [NEW] Absolute Filtering Logic & GRPO Advantage Injection
+        # [NEW] Absolute Filtering Logic (绝对过滤逻辑 - 已修复一致性问题)
         # =========================================================
         group_size = self.config.env.rollout.n
         
-        # 1. 默认初始化标记
+        # 第一步：初始化所有样本的标记。确保 DataProto 中该 key 的长度覆盖全样本。
         if is_train:
             for i in range(len(total_batch_list)):
                 for step_data in total_batch_list[i]:
                     step_data['is_filtered'] = False
 
-        traj_advantages = np.zeros_like(total_episode_rewards, dtype=np.float32)
-
+        # 第二步：对满足条件的组执行绝对过滤
         if is_train and group_size > 1:
             outcomes = np.array(total_success.get('success_rate', []))
             
@@ -606,31 +652,20 @@ class TrajectoryCollector:
                 for i in range(0, len(outcomes), group_size):
                     group_slice = outcomes[i : i + group_size]
                     
-                    # 判断该组是否全败 (all 0) 或全胜 (all 1) 执行绝对过滤
+                    # 判断该组是否全败 (all 0) 或全胜 (all 1)
                     if np.all(group_slice == 0) or np.all(group_slice == 1):
+                        # 抹平该组的总奖励
                         total_episode_rewards[i : i + group_size] = 0.0
+                        
+                        # 抹平该组内每条轨迹的每一步奖励，并标记过滤
                         for j in range(i, i + group_size):
                             for step_data in total_batch_list[j]:
                                 step_data['step_reward'] = 0.0
                                 step_data['is_filtered'] = True 
-                    
-                    # 2. 计算并存储 GRPO 优势 (基于过滤后的结果)
-                    group_outcomes = total_episode_rewards[i : i + group_size]
-                    mean = np.mean(group_outcomes)
-                    std = np.std(group_outcomes)
-                    if std > 1e-6:
-                        adv = (group_outcomes - mean) / (std + 1e-8)
-                    else:
-                        adv = np.zeros_like(group_outcomes)
-                    traj_advantages[i : i + group_size] = adv
-
-        # 3. 将计算好的轨迹优势注入到每个 Step 的数据字典中
-        for i in range(len(total_batch_list)):
-            for step_data in total_batch_list[i]:
-                step_data['traj_advantage'] = float(traj_advantages[i])
+        # =========================================================
 
         # =========================================================
-        # [NEW] GRPO Advantage Logger (Terminal Output)
+        # [NEW] GRPO Advantage Logger Intersection
         # =========================================================
         try:
             if group_size > 1 and is_train:
@@ -638,7 +673,7 @@ class TrajectoryCollector:
                 for i in range(len(total_batch_list)):
                     mode = "Unknown"
                     if len(total_batch_list[i]) > 0:
-                        prompt_text = str(total_batch_list[i][0].get('final_prompt_text', ''))
+                        prompt_text = total_batch_list[i][0].get('final_prompt_text', '')
                         if "CLEAR WEATHER" in prompt_text:
                             mode = "System1"
                         elif "FOG OF WAR" in prompt_text:
@@ -651,6 +686,7 @@ class TrajectoryCollector:
             print(f"[Warning] Failed to compute and log GRPO advantages: {e}")
         # =========================================================
 
+        # Create trajectory data
         gen_batch_output: DataProto = self.gather_rollout_data(
             total_batch_list=total_batch_list,
             episode_rewards=total_episode_rewards,
@@ -660,6 +696,7 @@ class TrajectoryCollector:
             tool_callings=totoal_tool_callings,
         )
         
+        # --- 保存逻辑 (保持不变) ---
         REMOVE_KEYS = ['pixel_values', 'image_grid_thw'] 
         PARENT_KEY = 'multi_modal_inputs' 
         END_KEYS = ['model_response_text', 'anchor_obs', 'final_prompt_text', 'raw_prompt', 'parsed_think']

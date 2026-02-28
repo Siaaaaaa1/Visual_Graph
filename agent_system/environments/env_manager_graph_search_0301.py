@@ -117,7 +117,7 @@ At each step, choose **exactly one** action:
 
 ## 5. Response Format
 1. **<think>...** Detailed Chain of Thought. Analyze shapes, autonomously sample nodes to build evidence, verify hypotheses, and map clusters to the Candidate Categories.
-2. **<summary>...** Summarize your current findings and progress to ground your next action.
+2. **<summary>...** **[MEMORY PASSING]** Summarize actual knowledge derived for short-term memory.
 3. **<action>...** One valid command.
 """
 
@@ -178,7 +178,49 @@ The center text confirms it uses the computational method for an application (dr
 """
 
 # =================================================================
-# 3. Environment Manager
+# 3. Prompt Assembly Templates
+# =================================================================
+
+TEMPLATE_NO_HIS = """{task_instruction}
+{few_shot}
+
+=== Initial State ===
+{initial_state}
+
+=== Current Observation ===
+Current Visual View: <image>
+
+Current step: 1
+
+Response Format:
+1. First, analyze the current state. Output your thinking naturally inside <think>...</think>.
+2. Next, consolidate your reasoning into a detailed summary inside <summary>...</summary>.
+3. Finally, on a new line, output the chosen action wrapped in <action>...</action> tags.
+"""
+
+TEMPLATE_WITH_HIS = """{task_instruction}
+{few_shot}
+
+=== Initial State (Reference) ===
+{initial_state}
+
+=== History ===
+(The following is a log of your previous actions and observations):
+{memory_context}
+
+=== Current Observation ===
+Current Visual View (Snapshot after your last action): <image>
+
+Current step: {step_count}
+
+Response Format:
+1. First, review the history and analyze the current state inside <think>...</think>.
+2. Next, consolidate your reasoning into a detailed summary inside <summary>...</summary>.
+3. Finally, on a new line, output the chosen action wrapped in <action>...</action> tags.
+"""
+
+# =================================================================
+# 4. Environment Manager
 # =================================================================
 
 class GraphSearchEnvironmentManager(EnvironmentManagerBase):
@@ -203,32 +245,14 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         self.current_run_log_file = os.path.join(self.log_dir, f"run_{run_timestamp}_pid{os.getpid()}.jsonl")
         
         self.episode_trajectories = {}
-        self.conversations = [] # 维护原生的多轮对话
 
     def reset(self, kwargs) -> Tuple[Dict[str, Any], List[Dict]]:
         text_obs, image_obs, infos = self.envs.reset(kwargs=kwargs)
         self.initial_states = text_obs
         
         self.initial_modes = [info.get("mode", "System2") for info in infos]
+        
         self.memory.reset(batch_size=len(text_obs))
-
-        # =========================================================
-        # [核心修复] 初始化原生多轮对话列表：System Role + User <image>
-        # =========================================================
-        self.conversations = []
-        for i in range(len(text_obs)):
-            mode = self.initial_modes[i]
-            if mode == "System1":
-                sys_inst = SYSTEM1_TASK_INSTRUCTION + "\n" + SYSTEM1_FEW_SHOT
-            else:
-                sys_inst = SYSTEM2_TASK_INSTRUCTION + "\n" + SYSTEM2_FEW_SHOT
-
-            # 将 Prompt 完美融合进 ChatML 原生格式
-            conv = [
-                {"role": "system", "content": sys_inst},
-                {"role": "user", "content": f"=== Initial State ===\n{text_obs[i]}\n\nCurrent Visual View: <image>"}
-            ]
-            self.conversations.append(conv)
 
         for i in range(len(text_obs)):
             self.episode_trajectories[i] = {
@@ -240,14 +264,14 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             }
 
         observations = {
-            "text": [conv.copy() for conv in self.conversations], 
+            "text": self.build_text_obs(init=True), 
             "image": image_obs, 
             "anchor": text_obs.copy(), 
         }
 
         for i, prompt in enumerate(observations["text"]):
              if i in self.episode_trajectories:
-                 self.episode_trajectories[i]["initial_prompt"] = str(prompt)
+                 self.episode_trajectories[i]["initial_prompt"] = prompt
 
         return observations, infos
 
@@ -275,17 +299,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         actions, valids = self.projection_f(text_actions)
         next_text_obs, next_image_obs, rewards, dones, infos = self.envs.step(actions)
 
-        # =========================================================
-        # [核心修复] 多轮对话状态追加 (坚决不碰历史记录中的 <image>)
-        # =========================================================
-        for i, act_text in enumerate(text_actions):
-            # 1. 拼接模型的动作
-            self.conversations[i].append({"role": "assistant", "content": act_text})
-            
-            # 2. 拼接环境的纯文本新反馈
-            feedback_content = f"=== Step {len(self.episode_trajectories[i]['steps']) + 1} Environment Feedback ===\n{next_text_obs[i]}"
-            self.conversations[i].append({"role": "user", "content": feedback_content})
-
         self.memory.store({
             "search": actions,
             "information": next_text_obs,
@@ -293,8 +306,8 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         })
 
         next_observations = {
-            "text": [conv.copy() for conv in self.conversations], 
-            "image": next_image_obs, # 将新图传入，Processor 会自动去寻找第一轮的 <image> 占位符并替换
+            "text": self.build_text_obs(init=False), 
+            "image": next_image_obs, 
             "anchor": next_text_obs.copy(),
         }
 
@@ -318,7 +331,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
                     "env_feedback_obs": next_text_obs[i],
                     "step_reward": float(rewards[i]),
                     "done": bool(dones[i]),
-                    "next_prompt": str(next_observations["text"][i]) if not dones[i] else "N/A"
+                    "next_prompt": next_observations["text"][i] if not dones[i] else "N/A (Episode Finished)"
                 }
                 self.episode_trajectories[i]["steps"].append(step_record)
 
@@ -349,3 +362,45 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             
         except Exception as e:
             print(f"[Check_Log] Error saving trajectory for env {env_idx}: {e}")
+
+    def build_text_obs(self, init: bool) -> List[str]:
+        batch_size = len(self.initial_states)
+        rendered_prompts: List[str] = []
+
+        if not init:
+            memory_ctx, _ = self.memory.fetch(
+                obs_key="information",
+                action_key="search",
+                summary_key="summary"
+            )
+        else:
+            memory_ctx = [""] * batch_size
+
+        for i in range(batch_size):
+            current_mode = self.initial_modes[i]
+            
+            if current_mode == "System1":
+                task_inst = SYSTEM1_TASK_INSTRUCTION
+                few_shot = SYSTEM1_FEW_SHOT
+            else:
+                task_inst = SYSTEM2_TASK_INSTRUCTION
+                few_shot = SYSTEM2_FEW_SHOT
+
+            if init:
+                prompt = TEMPLATE_NO_HIS.format(
+                    task_instruction=task_inst,
+                    few_shot=few_shot,
+                    initial_state=self.initial_states[i]
+                )
+            else:
+                prompt = TEMPLATE_WITH_HIS.format(
+                    task_instruction=task_inst,
+                    few_shot=few_shot,
+                    initial_state=self.initial_states[i],
+                    memory_context=memory_ctx[i],
+                    step_count=len(self.memory[i]) + 1
+                )
+            
+            rendered_prompts.append(prompt)
+
+        return rendered_prompts
