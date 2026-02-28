@@ -211,12 +211,12 @@ class FullSequenceSearchMemory(BaseMemory):
 
     def fetch(
         self,
-        history_length: int,
-        obs_key: str,
-        action_key: str,
+        history_length: int = 10,         # 【修复】：添加默认值 10 (与 max_steps 对应)
+        obs_key: str = "information",     # 【修复】：添加默认键值
+        action_key: str = "search",       # 【修复】：添加默认键值
         summary_key: str = "summary",
-        max_summary_len: int = 1500,  # [核心修改]：放宽截断限制到 1500
-        max_obs_len: int = 8000       # [核心修改]：放宽截断限制到 8000，保障多节点读取
+        max_summary_len: int = 1500,  
+        max_obs_len: int = 8000       
     ) -> Tuple[List[str], List[int]]:
         
         memory_contexts, valid_lengths = [], []
@@ -229,7 +229,9 @@ class FullSequenceSearchMemory(BaseMemory):
             lines = []
             for i, rec in enumerate(all_history):
                 step_num = i + 1
-                act = rec[action_key]
+                
+                # 安全获取键值，防止 key 不存在
+                act = rec.get(action_key, "No Action")
                 
                 # --- [Summary 处理] ---
                 raw_summary = rec.get(summary_key, "")
@@ -241,7 +243,7 @@ class FullSequenceSearchMemory(BaseMemory):
                 # --- [Observation 处理] ---
                 if i >= start_obs_idx:
                     # 即使是显示的 observation，也要进行截断检查
-                    raw_obs = str(rec[obs_key]) # 确保是字符串
+                    raw_obs = str(rec.get(obs_key, "")) 
                     if len(raw_obs) > max_obs_len:
                         disp_obs = raw_obs[:max_obs_len] + "...(truncated obs)"
                     else:
