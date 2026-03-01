@@ -516,7 +516,14 @@ class TrajectoryCollector:
 
         return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
 
-    def compute_and_log_grpo_advantages(self, rewards: torch.Tensor, env_modes: list, group_size: int):
+    def compute_and_log_grpo_advantages(
+        self, 
+        rewards: torch.Tensor, 
+        env_modes: list, 
+        group_size: int, 
+        total_batch_list: list = None, 
+        total_success: dict = None
+    ):
         if rewards.dim() == 1:
             if rewards.shape[0] % group_size != 0:
                 print(f"[Warning] Total rewards length {rewards.shape[0]} is not divisible by group_size {group_size}. Skipping GRPO Analytics.")
@@ -564,7 +571,81 @@ class TrajectoryCollector:
             if group_std[i].item() <= 1e-6:
                 print("   ⚠️ WARNING: Zero Variance! Advantages collapsed to 0.")
             print("-" * 50)
-        
+
+        # =========================================================
+        # [NEW] Mode-wise Statistics & Random Trajectory Logger
+        # =========================================================
+        if total_batch_list is not None and total_success is not None:
+            flat_advantages = advantages.flatten().cpu().numpy()
+            flat_rewards = rewards.flatten().cpu().numpy()
+            outcomes = total_success.get('success_rate', np.zeros_like(flat_rewards))
+            
+            stats = {
+                "System1": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []},
+                "System2": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []}
+            }
+
+            # 归类统计数据
+            for i in range(len(total_batch_list)):
+                mode = env_modes[i] if i < len(env_modes) else "Unknown"
+                if mode not in stats: continue
+                
+                # 判断成功与否 (根据业务逻辑，>=1.0 视为成功，你可以按需调整阈值)
+                is_success = outcomes[i] >= 1.0  
+                if is_success:
+                    stats[mode]["success"] += 1
+                else:
+                    stats[mode]["fail"] += 1
+                
+                stats[mode]["advs"].append(flat_advantages[i])
+                stats[mode]["traj_indices"].append(i)
+
+                # 提取每一步的 reward
+                for step_data in total_batch_list[i]:
+                    stats[mode]["step_rewards"].append(step_data.get('step_reward', 0.0))
+
+            # 打印统计信息
+            print("\n📊 [Mode-wise Detailed Statistics]")
+            for mode in ["System1", "System2"]:
+                s = stats[mode]
+                if not s["traj_indices"]:
+                    print(f"🔹 {mode}: No samples found.")
+                    continue
+                
+                mean_adv = np.mean(s["advs"]) if s["advs"] else 0.0
+                mean_step_rew = np.mean(s["step_rewards"]) if s["step_rewards"] else 0.0
+                print(f"🔹 {mode}:")
+                print(f"   - Total Trajectories: {len(s['traj_indices'])}")
+                print(f"   - Outcome: {s['success']} Success | {s['fail']} Fail")
+                print(f"   - Mean Advantage: {mean_adv:.4f}")
+                print(f"   - Mean Step Reward: {mean_step_rew:.4f}")
+
+            # 打印随机轨迹全过程
+            print("\n🎲 [Random Trajectory Samples (Filtered <|image_pad|>)]")
+            import random
+            for mode in ["System1", "System2"]:
+                s = stats[mode]
+                if not s["traj_indices"]:
+                    continue
+                
+                rand_idx = random.choice(s["traj_indices"])
+                print(f"\n🟢 [Sample {mode} Trajectory | Index: {rand_idx}]")
+                print(f"   - Final Outcome: {'Success' if outcomes[rand_idx] >= 1.0 else 'Fail'}")
+                print(f"   - Episode Reward: {flat_rewards[rand_idx]:.4f} | Advantage: {flat_advantages[rand_idx]:.4f}")
+                
+                traj_steps = total_batch_list[rand_idx]
+                for step_idx, step_data in enumerate(traj_steps):
+                    # 获取文本并去掉 <|image_pad|>
+                    prompt = str(step_data.get('final_prompt_text', '')).replace('<|image_pad|>', '')
+                    response = str(step_data.get('model_response_text', '')).replace('<|image_pad|>', '')
+                    step_reward = step_data.get('step_reward', 0.0)
+                    
+                    print(f"\n   --- Step {step_idx} ---")
+                    print(f"   [Prompt]:\n{prompt}")
+                    print(f"   [Response]:\n{response}")
+                    print(f"   [Step Reward]: {step_reward}")
+            print("="*50 + "\n")
+
         return advantages
 
     def multi_turn_loop(
@@ -646,7 +727,15 @@ class TrajectoryCollector:
                     env_modes.append(mode)
                 
                 rewards_tensor = torch.tensor(total_episode_rewards, dtype=torch.float32)
-                self.compute_and_log_grpo_advantages(rewards_tensor, env_modes, group_size)
+                
+                # 【修改这里：传入 total_batch_list 和 total_success 以支持进一步统计】
+                self.compute_and_log_grpo_advantages(
+                    rewards_tensor, 
+                    env_modes, 
+                    group_size, 
+                    total_batch_list=total_batch_list, 
+                    total_success=total_success
+                )
         except Exception as e:
             print(f"[Warning] Failed to compute and log GRPO advantages: {e}")
         # =========================================================

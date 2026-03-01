@@ -890,7 +890,7 @@ class CriticWorker(Worker):
             critic_model_config.hidden_dropout = "0"
             
             # =================================================================
-            # [VLM 终极 Hack]：拦截 Qwen3-VL (及其他 VLM) 的 Critic 初始化报错，注入 Zero-Value Dummy
+            # [VLM 终极 Hack]：修复 autograd 截断问题
             # =================================================================
             try:
                 critic_module = AutoModelForTokenClassification.from_pretrained(
@@ -902,7 +902,7 @@ class CriticWorker(Worker):
             except ValueError as e:
                 if "TokenClassification" in str(e) or "Qwen" in str(e) or "Unrecognized configuration class" in str(e):
                     print("\n" + "🔥"*20)
-                    print(">>> [VLM HACK] 成功拦截 VLM Critic 缺失报错！注入 Zero-Value Dummy Critic <<<")
+                    print(">>> [VLM HACK] 成功拦截 VLM Critic 缺失报错！注入带有计算图的 Dummy Critic <<<")
                     print("🔥"*20 + "\n")
                     
                     from transformers import PreTrainedModel, PretrainedConfig
@@ -920,13 +920,17 @@ class CriticWorker(Worker):
                             self.dummy_layer = torch.nn.Linear(1, 1) 
                             
                         def forward(self, input_ids, **kwargs):
-                            # 无视任何 text/image 输入，永远返回 0 张量
                             batch_size, seq_len = input_ids.shape
-                            logits = torch.zeros(
+                            # 【核心修复】：创建一个与 dummy_layer 对应的假输入
+                            dummy_in = torch.zeros(
                                 batch_size, seq_len, 1, 
                                 device=input_ids.device, 
                                 dtype=self.dummy_layer.weight.dtype
                             )
+                            # 【挂载计算图】：让前向传播经过网络层，以产生 grad_fn，防止 backward 报错
+                            logits = self.dummy_layer(dummy_in)
+                            # 【保证数学逻辑】：乘以 0 强制归零，保证 Advantage 完全吃进 GRPO 真实分数
+                            logits = logits * 0.0
                             return TokenClassifierOutput(logits=logits)
                     
                     critic_module = DummyCritic(DummyCriticConfig()).to(torch_dtype)
@@ -1244,7 +1248,7 @@ class RewardModelWorker(Worker):
             model_config.classifier_dropout = 0.0
             
             # =================================================================
-            # [VLM 终极 Hack]：同时为 Reward Model 拦截不支持的头，保持代码一致性
+            # [VLM 终极 Hack]：同样为 Reward Model 添加带梯度的假数据
             # =================================================================
             try:
                 reward_module = AutoModelForTokenClassification.from_pretrained(
@@ -1257,7 +1261,7 @@ class RewardModelWorker(Worker):
             except ValueError as e:
                 if "TokenClassification" in str(e) or "Qwen" in str(e) or "Unrecognized configuration class" in str(e):
                     print("\n" + "🔥"*20)
-                    print(">>> [VLM HACK] 成功拦截 VLM Reward Model 缺失报错！注入 Zero-Value Dummy <<<")
+                    print(">>> [VLM HACK] 成功拦截 VLM Reward Model 缺失报错！注入带梯度的 Dummy <<<")
                     print("🔥"*20 + "\n")
                     
                     from transformers import PreTrainedModel, PretrainedConfig
@@ -1275,11 +1279,13 @@ class RewardModelWorker(Worker):
                             
                         def forward(self, input_ids, **kwargs):
                             batch_size, seq_len = input_ids.shape
-                            logits = torch.zeros(
+                            dummy_in = torch.zeros(
                                 batch_size, seq_len, 1, 
                                 device=input_ids.device, 
                                 dtype=self.dummy_layer.weight.dtype
                             )
+                            logits = self.dummy_layer(dummy_in)
+                            logits = logits * 0.0
                             return TokenClassifierOutput(logits=logits)
                     
                     reward_module = DummyCritic(DummyCriticConfig()).to(torch.bfloat16)
