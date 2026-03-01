@@ -4,9 +4,6 @@ export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=FLASHINFER
 export VERL_PPO_ASYNC_ROLLOUT=1 
 
-# [删除] 这一行会导致 vLLM 启动崩溃，必须删掉
-# export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-
 export WANDB_API_KEY="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"
 export MASTER_ADDRESS=127.0.0.1
 export WORLD_SIZE=8
@@ -21,8 +18,10 @@ group_size=8
 MODEL_PATH="./models/Qwen3-VL-4B-Instruct"
 
 ppo_mini_batch_size=256
-micro_batch_size=2
-log_prob_batch_size=2
+
+# 🔥【修改点 1】：将微批次降为 1，直接减半反向传播的激活显存压力
+micro_batch_size=1
+log_prob_batch_size=1
 
 # --- 2. 脚本信息获取 ---
 SCRIPT_NAME=$(basename "$0" .sh)
@@ -80,7 +79,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=$log_prob_batch_size \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.name=$ENGINE \
@@ -101,7 +100,7 @@ python3 -m verl.trainer.main_ppo \
     critic.model.enable_gradient_checkpointing=True \
     critic.ppo_micro_batch_size_per_gpu=$micro_batch_size \
     critic.model.fsdp_config.param_offload=False \
-    critic.model.fsdp_config.optimizer_offload=False \
+    critic.model.fsdp_config.optimizer_offload=True \
     algorithm.use_kl_in_reward=True \
     env.env_name=graph_search/GraphSearchEnv \
     env.seed=42 \

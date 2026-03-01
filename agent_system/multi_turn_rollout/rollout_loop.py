@@ -347,6 +347,10 @@ class TrajectoryCollector:
             for i in range(batch_size):
                 if i >= 1: break 
                 
+                if not active_masks[i]:
+                    print(f"\n--- [Sample {i}] --- (Skipped: Episode already finished)")
+                    continue
+
                 print(f"\n--- [Sample {i}] ---")
                 
                 valid_input_len = batch_input.batch['attention_mask'][i].sum().item()
@@ -593,7 +597,8 @@ class TrajectoryCollector:
 
                 # 提取每一步的 reward
                 for step_data in total_batch_list[i]:
-                    stats[mode]["step_rewards"].append(step_data.get('step_reward', 0.0))
+                    if step_data.get('active_masks', True):
+                        stats[mode]["step_rewards"].append(step_data.get('step_reward', 0.0))
 
             # 打印统计信息
             print("\n📊 [Mode-wise Detailed Statistics]")
@@ -626,6 +631,8 @@ class TrajectoryCollector:
                 
                 traj_steps = total_batch_list[rand_idx]
                 for step_idx, step_data in enumerate(traj_steps):
+                    if not step_data.get('active_masks', True):
+                        continue
                     # 获取文本并去掉 <|image_pad|>
                     prompt = str(step_data.get('final_prompt_text', '')).replace('<|image_pad|>', '')
                     response = str(step_data.get('model_response_text', '')).replace('<|image_pad|>', '')
