@@ -213,7 +213,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         self.memory.reset(batch_size=len(text_obs))
 
         # =========================================================
-        # [核心修复] 初始化原生多轮对话列表：System Role + User <image>
+        # 初始化原生多轮对话列表：System Role + User <image>
         # =========================================================
         self.conversations = []
         for i in range(len(text_obs)):
@@ -282,8 +282,13 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             # 1. 拼接模型的动作
             self.conversations[i].append({"role": "assistant", "content": act_text})
             
-            # 2. 拼接环境的纯文本新反馈
-            feedback_content = f"=== Step {len(self.episode_trajectories[i]['steps']) + 1} Environment Feedback ===\n{next_text_obs[i]}"
+            # 2. 拼接环境的纯文本新反馈 (加入 Key 防护机制)
+            if i in self.episode_trajectories:
+                step_num = len(self.episode_trajectories[i]['steps']) + 1
+            else:
+                step_num = "N/A (Finished)"
+                
+            feedback_content = f"=== Step {step_num} Environment Feedback ===\n{next_text_obs[i]}"
             self.conversations[i].append({"role": "user", "content": feedback_content})
 
         self.memory.store({
