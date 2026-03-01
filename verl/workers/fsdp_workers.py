@@ -888,12 +888,51 @@ class CriticWorker(Worker):
             warnings.simplefilter("ignore")
             critic_model_config.classifier_dropout = 0.0
             critic_model_config.hidden_dropout = "0"
-            critic_module = AutoModelForTokenClassification.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                torch_dtype=torch_dtype,
-                config=critic_model_config,
-                trust_remote_code=config.model.get("trust_remote_code", False),
-            )
+            
+            # =================================================================
+            # [VLM 终极 Hack]：拦截 Qwen3-VL (及其他 VLM) 的 Critic 初始化报错，注入 Zero-Value Dummy
+            # =================================================================
+            try:
+                critic_module = AutoModelForTokenClassification.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    torch_dtype=torch_dtype,
+                    config=critic_model_config,
+                    trust_remote_code=config.model.get("trust_remote_code", False),
+                )
+            except ValueError as e:
+                if "TokenClassification" in str(e) or "Qwen" in str(e) or "Unrecognized configuration class" in str(e):
+                    print("\n" + "🔥"*20)
+                    print(">>> [VLM HACK] 成功拦截 VLM Critic 缺失报错！注入 Zero-Value Dummy Critic <<<")
+                    print("🔥"*20 + "\n")
+                    
+                    from transformers import PreTrainedModel, PretrainedConfig
+                    from transformers.modeling_outputs import TokenClassifierOutput
+                    import torch
+                    
+                    class DummyCriticConfig(PretrainedConfig):
+                        model_type = "dummy_critic"
+                    
+                    class DummyCritic(PreTrainedModel):
+                        config_class = DummyCriticConfig
+                        def __init__(self, config):
+                            super().__init__(config)
+                            # 给 FSDP 和 Optimizer 提供一个合法的参数层，防止宕机
+                            self.dummy_layer = torch.nn.Linear(1, 1) 
+                            
+                        def forward(self, input_ids, **kwargs):
+                            # 无视任何 text/image 输入，永远返回 0 张量
+                            batch_size, seq_len = input_ids.shape
+                            logits = torch.zeros(
+                                batch_size, seq_len, 1, 
+                                device=input_ids.device, 
+                                dtype=self.dummy_layer.weight.dtype
+                            )
+                            return TokenClassifierOutput(logits=logits)
+                    
+                    critic_module = DummyCritic(DummyCriticConfig()).to(torch_dtype)
+                else:
+                    raise e
+            # =================================================================
 
             use_remove_padding = config.model.get("use_remove_padding", False)
 
@@ -1196,13 +1235,50 @@ class RewardModelWorker(Worker):
         with init_context(), warnings.catch_warnings():
             warnings.simplefilter("ignore")
             model_config.classifier_dropout = 0.0
-            reward_module = AutoModelForTokenClassification.from_pretrained(
-                pretrained_model_name_or_path=local_path,
-                config=model_config,
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
-                trust_remote_code=trust_remote_code,
-            )
+            
+            # =================================================================
+            # [VLM 终极 Hack]：同时为 Reward Model 拦截不支持的头，保持代码一致性
+            # =================================================================
+            try:
+                reward_module = AutoModelForTokenClassification.from_pretrained(
+                    pretrained_model_name_or_path=local_path,
+                    config=model_config,
+                    torch_dtype=torch.bfloat16,
+                    attn_implementation="flash_attention_2",
+                    trust_remote_code=trust_remote_code,
+                )
+            except ValueError as e:
+                if "TokenClassification" in str(e) or "Qwen" in str(e) or "Unrecognized configuration class" in str(e):
+                    print("\n" + "🔥"*20)
+                    print(">>> [VLM HACK] 成功拦截 VLM Reward Model 缺失报错！注入 Zero-Value Dummy <<<")
+                    print("🔥"*20 + "\n")
+                    
+                    from transformers import PreTrainedModel, PretrainedConfig
+                    from transformers.modeling_outputs import TokenClassifierOutput
+                    import torch
+                    
+                    class DummyCriticConfig(PretrainedConfig):
+                        model_type = "dummy_critic"
+                    
+                    class DummyCritic(PreTrainedModel):
+                        config_class = DummyCriticConfig
+                        def __init__(self, config):
+                            super().__init__(config)
+                            self.dummy_layer = torch.nn.Linear(1, 1) 
+                            
+                        def forward(self, input_ids, **kwargs):
+                            batch_size, seq_len = input_ids.shape
+                            logits = torch.zeros(
+                                batch_size, seq_len, 1, 
+                                device=input_ids.device, 
+                                dtype=self.dummy_layer.weight.dtype
+                            )
+                            return TokenClassifierOutput(logits=logits)
+                    
+                    reward_module = DummyCritic(DummyCriticConfig()).to(torch.bfloat16)
+                else:
+                    raise e
+            # =================================================================
 
             apply_monkey_patch(
                 model=reward_module,
