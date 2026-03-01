@@ -56,6 +56,9 @@ class DataParallelPPOCritic(BasePPOCritic):
 
         self.ulysses_sequence_parallel_size = self.config.get("ulysses_sequence_parallel_size", 1)
         self.device_name = get_device_name()
+        
+        # [FIX] 全局初始化 gradient_accumulation，防止多模态分支跳过定义
+        self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
     def _forward_micro_batch(self, micro_batch):
         response_length = micro_batch["responses"].size(-1)
@@ -206,6 +209,7 @@ class DataParallelPPOCritic(BasePPOCritic):
                     micro_batches, _ = rearrange_micro_batches(batch=mini_batch, max_token_len=max_token_len)
                 else:
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
+                    # 避免在多模态下跳过该变量赋值，这行可以保留或删除，上方 __init__ 已初始化
                     self.gradient_accumulation = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
 
                 self.critic_optimizer.zero_grad()
@@ -240,7 +244,9 @@ class DataParallelPPOCritic(BasePPOCritic):
                         # relative to the dynamic bsz
                         loss = vf_loss * (len(data) / self.config.ppo_mini_batch_size)
                     else:
-                        loss = vf_loss / self.gradient_accumulation
+                        # [FIX] 安全计算，直接读取类初始化时的属性或动态计算
+                        grad_acc = self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
+                        loss = vf_loss / grad_acc
 
                     loss.backward()
 
