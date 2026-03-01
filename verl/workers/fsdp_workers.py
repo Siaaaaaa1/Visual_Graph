@@ -934,21 +934,26 @@ class CriticWorker(Worker):
                     raise e
             # =================================================================
 
-            use_remove_padding = config.model.get("use_remove_padding", False)
+            # [FIX]: Dummy Critic 不需要且不能应用 monkey patch
+            is_dummy = getattr(critic_module.config, "model_type", None) == "dummy_critic"
+            
+            if not is_dummy:
+                use_remove_padding = config.model.get("use_remove_padding", False)
 
-            apply_monkey_patch(
-                model=critic_module,
-                use_remove_padding=use_remove_padding,
-                ulysses_sp_size=self.ulysses_sequence_parallel_size,
-            )
+                apply_monkey_patch(
+                    model=critic_module,
+                    use_remove_padding=use_remove_padding,
+                    ulysses_sp_size=self.ulysses_sequence_parallel_size,
+                )
 
             # some parameters may not in torch_dtype
             critic_module.to(torch_dtype)
 
-            if config.model.get("enable_gradient_checkpointing", False):
+            if config.model.get("enable_gradient_checkpointing", False) and not is_dummy:
                 critic_module.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         
-        if self._is_lora:
+        # [FIX]: Dummy Critic 跳过 LoRA 微调
+        if self._is_lora and getattr(critic_module.config, "model_type", None) != "dummy_critic":
             print("Applying LoRA to critic module")
             critic_module.enable_input_require_grads()
             # Convert config to regular Python types before creating PEFT model
@@ -1022,7 +1027,9 @@ class CriticWorker(Worker):
         else:
             raise NotImplementedError(f"Unknown strategy {config.strategy}")
 
-        if config.model.get("enable_activation_offload", False):
+        is_dummy = getattr(critic_module.module.config if isinstance(critic_module, FSDP) else critic_module.config, "model_type", None) == "dummy_critic"
+        
+        if config.model.get("enable_activation_offload", False) and not is_dummy:
             enable_gradient_checkpointing = config.model.get("enable_gradient_checkpointing", False)
             enable_activation_offloading(critic_module, config.strategy, enable_gradient_checkpointing)
 
@@ -1280,11 +1287,15 @@ class RewardModelWorker(Worker):
                     raise e
             # =================================================================
 
-            apply_monkey_patch(
-                model=reward_module,
-                use_remove_padding=config.model.get("use_remove_padding", False),
-                ulysses_sp_size=self.ulysses_sequence_parallel_size,
-            )
+            # [FIX]: Dummy Critic 不需要且不能应用 monkey patch
+            is_dummy = getattr(reward_module.config, "model_type", None) == "dummy_critic"
+
+            if not is_dummy:
+                apply_monkey_patch(
+                    model=reward_module,
+                    use_remove_padding=config.model.get("use_remove_padding", False),
+                    ulysses_sp_size=self.ulysses_sequence_parallel_size,
+                )
 
             reward_module.to(torch.bfloat16)
 
