@@ -260,6 +260,10 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         # [核心修复] 多轮对话状态追加 (坚决不碰历史记录中的 <image>)
         # =========================================================
         for i, act_text in enumerate(text_actions):
+
+            if i not in self.episode_trajectories:
+                continue
+
             # 1. 拼接模型的动作
             self.conversations[i].append({"role": "assistant", "content": act_text})
             
@@ -308,6 +312,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
                 if dones[i]:
                     self.episode_trajectories[i]["final_reward"] = float(rewards[i])
                     self.episode_trajectories[i]["won"] = info.get("won", False)
+                    self.episode_trajectories[i]["failure_reason"] = info.get("failure_reason", "Unknown")
                     self._save_trajectory_to_disk(i)
 
         return next_observations, to_numpy(rewards), to_numpy(dones), infos

@@ -109,7 +109,7 @@ class GraphSearchEnv:
         sorted_by_deg = sorted(node_degrees.items(), key=lambda x: x[1], reverse=True)
         self.top3_hubs = set([nid for nid, _ in sorted_by_deg[:3]])
 
-        # 统计可视范围内的真实类别分布（排除中心节点，以维持群组规则逻辑的准确）
+        # 统计可视范围内的真实类别分布
         valid_view_nodes = [n for n in view_nodes if n != self.center_id]
         class_counts_view = {}
         for nid in valid_view_nodes:
@@ -118,7 +118,6 @@ class GraphSearchEnv:
             
         prioritized_classes = sorted(class_counts_view.keys(), key=lambda tc: class_counts_view[tc], reverse=True)
         
-        # 【底层稳定性需求】提取全局类别用于固化色板和匿名组映射，防止后续视角切换导致报错。不暴露给 Agent。
         all_classes = self.visualizer.get_all_candidate_classes()
         all_classes_set = set(all_classes)
         for tc in prioritized_classes:
@@ -166,13 +165,13 @@ class GraphSearchEnv:
             req_groups = sorted([self.anon_map[tc] for tc in self.required_classes])
             
             if req_groups:
-                gate_instruction = f"🚨 GATE REQUIREMENT: You must correctly paint EACH of these Major Clusters: [{', '.join(req_groups)}]. (Groups <10% or beyond top 4 are ignored)."
+                needed_count = max(1, len(self.required_classes) // 2 + (len(self.required_classes) % 2))
+                gate_instruction = f"🚨 GATE REQUIREMENT: You must correctly paint AT LEAST {needed_count} of these Major Clusters: [{', '.join(req_groups)}]. (Groups <10% or beyond top 4 are ignored)."
             else:
                 gate_instruction = f"🚨 GATE REQUIREMENT: Highly fragmented graph. Paint ANY 1 correct Group to unlock the gate."
 
         stats = self.visualizer.get_node_degree_info(self.center_id)
         
-        # 【核心修改点】：提取当前视野内的邻居真实类别，并务必加上“中心节点”的真实类别
         visible_classes_set = set(class_counts_view.keys())
         center_tc = self.visualizer._get_node_info(self.center_id)["true_class"]
         visible_classes_set.add(center_tc)
@@ -186,7 +185,7 @@ class GraphSearchEnv:
             max_nodes=init_max_nodes,
             color_seed=self.episode_color_seed,
             mask_neighbors=mask_neighbors_init,
-            painted_nodes={}, # 【修改】传空字典
+            painted_nodes={},
             color_mapping=self.color_mapping,
             anon_map=self.anon_map
         )
@@ -272,7 +271,6 @@ class GraphSearchEnv:
 
         if not current_action or self.done:
             img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024,1024,3), dtype=np.uint8)
-            # 格式完全错误，惩罚统一调整为 -0.1
             return ("Invalid format" if not self.done else ""), img_ret, -0.1 if not self.done else 0.0, self.done, {
                 "parsed_action": "ERROR", 
                 "won": False, 
@@ -291,7 +289,6 @@ class GraphSearchEnv:
                         self.seen_nodes.add(node_id)
                         texts.append(f"Node {node_id} Text:\n{self.node_text_db.get(str(node_id), 'No text available.')[:400]}")
                     obs = "\n\n".join(texts)
-                    # 探索动作无冗余步数惩罚
                     reward = 0.0 
                 except Exception:
                     obs = "Error parsing check_node ids."
@@ -307,7 +304,6 @@ class GraphSearchEnv:
                     target_group = parts[0].strip()
                     cls = parts[1].strip()
                     
-                    # 匹配用户传入的 Group 是否有效
                     valid_group = None
                     gt_cls = None
                     for tc, anon in self.anon_map.items():
@@ -317,24 +313,32 @@ class GraphSearchEnv:
                             break
                             
                     if valid_group:
-                        if valid_group not in self.painted_groups:
+                        norm_pred = cls.lower().strip().strip(".'\"")
+                        norm_gt = gt_cls.lower().strip().strip(".'\"")
+                        
+                        # 获取该组当前的涂色状态
+                        current_paint = self.painted_groups.get(valid_group)
+                        current_norm = current_paint.lower().strip().strip(".'\"") if current_paint else None
+                        
+                        # 【核心优化】：如果本次涂色和当前已有的涂色完全一致，则拦截防刷分
+                        if current_norm == norm_pred:
+                            obs = f"[INVALID] {valid_group} is already painted as '{cls}'. Prevent Farming constraint triggered."
+                            reward = -0.1 
+                        else:
+                            # 允许涂色（首次涂色 或 纠错覆盖）
+                            action_word = "repainted" if current_paint else "painted"
                             self.paint_history[self.step_count] = (valid_group, cls)
-                            self.painted_groups[valid_group] = cls
-                            obs = f"[DELAYED FEEDBACK] {valid_group} painted as '{cls}'. Map updated. Correctness hidden."
+                            self.painted_groups[valid_group] = cls # 更新/覆盖最新状态
+                            obs = f"[DELAYED FEEDBACK] {valid_group} {action_word} as '{cls}'. Map updated. Correctness hidden."
                             
-                            # 对错奖励判断
-                            if cls.lower() == gt_cls.lower():
+                            if norm_pred == norm_gt:
                                 reward = 0.1
                             else:
                                 reward = -0.1
-                        else:
-                            obs = f"[INVALID] {valid_group} is already painted. Prevent Farming constraint triggered."
-                            reward = -0.1 
                     else:
                         obs = f"Invalid group name '{target_group}'. Please use names like 'Group 1'."
                         reward = -0.1
 
-                    # 【核心】不再调用 draw_subgraph 重新画图，直接在纯文本中更新 Legend
                     legend_dict = {}
                     for tc, c_conf in self.color_mapping.items():
                         color_name = c_conf["name"]
@@ -365,12 +369,11 @@ class GraphSearchEnv:
                     img_bytes, legend_dict = self.visualizer.draw_subgraph(
                         self.center_id, view_mode=v_mode, max_nodes=max_n, 
                         color_seed=self.episode_color_seed, mask_neighbors=True, 
-                        painted_nodes={}, # 修复：直接传入空字典
+                        painted_nodes={}, 
                         color_mapping=self.color_mapping, anon_map=self.anon_map
                     )
                     self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024)))
                     obs = f"Graph view updated. Legend: {self._format_legend(legend_dict)}"
-                    # 探索动作无冗余步数惩罚
                     reward = 0.0
                 except Exception:
                     obs = "Invalid check_graph format."
@@ -384,22 +387,27 @@ class GraphSearchEnv:
                 if self.mode == "System1":
                     done = True
                     self.done = True
-                    # 【对称奖励】对则 +1.0，错则 -1.0
                     reward = 1.0 if is_correct else -1.0
                     obs = "System 1 Final answer submitted."
                 else:
-                    # 获取已经被涂色的所有底层真实类别
                     painted_tcs = set()
-                    for grp in self.painted_groups.keys():
+                    for grp, pred_class in self.painted_groups.items():
                         for tc, anon in self.anon_map.items():
-                            if anon == grp:
-                                painted_tcs.add(tc)
+                            if anon.lower() == grp.lower():
+                                norm_pred = pred_class.lower().strip().strip(".'\"")
+                                norm_tc = tc.lower().strip().strip(".'\"")
+                                if norm_pred == norm_tc:
+                                    painted_tcs.add(tc)
                                 break
                     
                     if len(self.required_classes) == 0:
                         is_unlocked = len(painted_tcs) >= 1
                     else:
-                        is_unlocked = self.required_classes.issubset(painted_tcs)
+                        required_count = len(self.required_classes)
+                        needed_count = max(1, required_count // 2 + (required_count % 2)) 
+                        correct_required = len(painted_tcs.intersection(self.required_classes))
+                        
+                        is_unlocked = correct_required >= needed_count
                     
                     if is_unlocked:
                         done = True
@@ -408,7 +416,6 @@ class GraphSearchEnv:
                             reward = 1.0 
                             obs = f"Gate UNLOCKED. Final answer CORRECT!"
                         else:
-                            # 【对称奖励】错则 -1.0
                             reward = -1.0
                             obs = f"Gate UNLOCKED. Final answer WRONG."
                     else:
@@ -417,10 +424,12 @@ class GraphSearchEnv:
                         missing_classes = self.required_classes - painted_tcs
                         if len(self.required_classes) == 0:
                             missing_str = "ANY 1 correct Group"
+                            obs = f"Action Failed: Logic Gate Locked. You still need to paint: [{missing_str}]."
                         else:
                             missing_groups = sorted([self.anon_map[tc] for tc in missing_classes])
                             missing_str = ", ".join(missing_groups)
-                        obs = f"Action Failed: Logic Gate Locked. You still need to paint: [{missing_str}]."
+                            needed_more = needed_count - correct_required
+                            obs = f"Action Failed: Logic Gate Locked. You need to correctly paint at least {needed_more} more from the remaining required groups: [{missing_str}]."
             except Exception:
                 obs = "Invalid submit format."
                 reward = -0.1
@@ -428,20 +437,61 @@ class GraphSearchEnv:
             obs = f"Invalid action command."
             reward = -0.1
 
-        # 【对称超时惩罚】：达到 max_steps 直接给予最高惩罚
+        # ---------------------------------------------------------
+        # [新增逻辑]：判定失败原因 (Failure Reason Tracking)
+        # ---------------------------------------------------------
         if not done and self.step_count >= self.max_steps:
             done = True
             self.done = True
             reward = -1.0
+            
+        failure_reason = "Success"
+        if done and reward < 1.0: # 如果是失败的结局
+            is_final_action = current_action.startswith("final:") or current_action.startswith("submit:")
+            
+            if self.mode == "System1":
+                if is_final_action:
+                    failure_reason = "Sys1_Wrong_Answer"
+                else:
+                    failure_reason = "Sys1_Timeout"
+            else: # System 2
+                # 判断当前门是否处于解锁状态 (复用你之前的软匹配逻辑判定)
+                painted_tcs = set()
+                for grp, pred_class in self.painted_groups.items():
+                    for tc, anon in self.anon_map.items():
+                        if anon.lower() == grp.lower():
+                            if pred_class.lower().strip().strip(".'\"") == tc.lower().strip().strip(".'\""):
+                                painted_tcs.add(tc)
+                            break
+                is_unlocked = False
+                if len(self.required_classes) == 0:
+                    is_unlocked = len(painted_tcs) >= 1
+                else:
+                    needed_count = max(1, len(self.required_classes) // 2 + (len(self.required_classes) % 2))
+                    correct_required = len(painted_tcs.intersection(self.required_classes))
+                    is_unlocked = correct_required >= needed_count
+
+                if is_final_action:
+                    if not is_unlocked:
+                        failure_reason = "Sys2_Premature_Submit" # 没解锁就抢答
+                    else:
+                        failure_reason = "Sys2_Wrong_Answer"     # 解锁了但答错
+                else:
+                    if is_unlocked:
+                        failure_reason = "Sys2_Timeout_Unlocked" # 解锁了但没步数提交了
+                    else:
+                        failure_reason = "Sys2_Timeout_Locked"   # 超时且没解锁
+        # ---------------------------------------------------------
 
         info = {
             "step": self.step_count,
             "won": bool(reward == 1.0) if done else False,
-            "parsed_action": current_action
+            "parsed_action": current_action,
+            "failure_reason": failure_reason  # 将失败原因传给上层
         }
 
         return obs, self.current_image.copy() if self.current_image is not None else None, reward, done, info
-
+    
 def build_graph_search_envs(seed: int, env_num: int, group_n: int, is_train: bool, env_config):
     batch_size = env_num * group_n
     max_steps = env_config.max_steps

@@ -458,6 +458,31 @@ class TrajectoryCollector:
                     episode_lengths=episode_lengths,
                     )
         
+        # ---------------------------------------------------------
+        # [新增日志输出]：实时统计本 Batch 的失败原因分布
+        # ---------------------------------------------------------
+        failure_stats = {}
+        total_failures = 0
+        
+        for i in range(batch_size):
+            if episode_rewards[i] < 1.0: # 如果这条轨迹失败了
+                total_failures += 1
+                # 获取该轨迹最后一步的 info 中的 failure_reason
+                last_info = total_infos[i][-1] if total_infos[i] else {}
+                reason = last_info.get("failure_reason", "Unknown")
+                failure_stats[reason] = failure_stats.get(reason, 0) + 1
+
+        if total_failures > 0:
+            print(f"\n{'='*20} BATCH FAILURE ANALYSIS {'='*20}")
+            print(f"Total Failures in this batch: {total_failures}/{batch_size}")
+            # 按数量降序打印
+            sorted_fails = sorted(failure_stats.items(), key=lambda x: x[1], reverse=True)
+            for reason, count in sorted_fails:
+                percentage = (count / total_failures) * 100
+                print(f"  - {reason:<25}: {count:<4} ({percentage:.1f}%)")
+            print("="*64 + "\n")
+        # ---------------------------------------------------------
+        
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
             
     def dynamic_multi_turn_loop(
