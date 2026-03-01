@@ -58,7 +58,8 @@ class SimpleMemory(BaseMemory):
     def fetch(
         self,
         obs_key: str = "information",
-        action_key: str = "search"
+        action_key: str = "search",
+        summary_key: str = "summary"
     ) -> Tuple[List[str], List[int]]:
         
         memory_contexts, valid_lengths = [], []
@@ -71,11 +72,13 @@ class SimpleMemory(BaseMemory):
             for i, rec in enumerate(all_history):
                 step_num = i + 1
                 act = rec[action_key]
+                disp_summary = rec.get(summary_key, "")
                 # 强制保存完整的 observation
                 disp_obs = str(rec[obs_key])
 
                 block = (
                     f"=== Step {step_num} ===\n"
+                    f"<summary>{disp_summary}</summary>\n"
                     f"<action>{act}</action>\n"
                     f"Observation: {disp_obs}\n"
                 )
@@ -208,9 +211,11 @@ class FullSequenceSearchMemory(BaseMemory):
 
     def fetch(
         self,
-        history_length: int = 10,         
-        obs_key: str = "information",     
-        action_key: str = "search",       
+        history_length: int = 10,         # 【修复】：添加默认值 10 (与 max_steps 对应)
+        obs_key: str = "information",     # 【修复】：添加默认键值
+        action_key: str = "search",       # 【修复】：添加默认键值
+        summary_key: str = "summary",
+        max_summary_len: int = 1500,  
         max_obs_len: int = 8000       
     ) -> Tuple[List[str], List[int]]:
         
@@ -227,6 +232,13 @@ class FullSequenceSearchMemory(BaseMemory):
                 
                 # 安全获取键值，防止 key 不存在
                 act = rec.get(action_key, "No Action")
+                
+                # --- [Summary 处理] ---
+                raw_summary = rec.get(summary_key, "")
+                if raw_summary and len(raw_summary) > max_summary_len:
+                    disp_summary = raw_summary[:max_summary_len] + "...(truncated summary)"
+                else:
+                    disp_summary = raw_summary
 
                 # --- [Observation 处理] ---
                 if i >= start_obs_idx:
@@ -245,6 +257,7 @@ class FullSequenceSearchMemory(BaseMemory):
                 # --- 格式构建 ---
                 block = (
                     f"=== Step {step_num} ===\n"
+                    f"<summary>{disp_summary}</summary>\n"
                     f"<action>{act}</action>\n"
                     f"{obs_str}\n"
                 )

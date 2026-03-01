@@ -34,8 +34,7 @@ At each step, you must choose **exactly one** action:
 
 ## 4. Response Format
 1. **<think>...** Analyze the center text against the representative texts. Decide whether to follow or override the topological majority.
-2. **<summary>...** State your final conclusion and textual justification.
-3. **<action>...** Output your final action using a category from the Candidate Categories.
+2. **<action>...** Output your final action using a category from the Candidate Categories.
 """
 
 SYSTEM1_FEW_SHOT = """
@@ -58,7 +57,6 @@ I am in System 1 (Clear Weather). I must evaluate the texts without exploring.
 3. Representative Matching: The NLP representative discusses "language translation", which does not match. The Computer Vision representative discusses "Image classification", which perfectly aligns with the center node's visual task.
 Conclusion: The high NLP neighbor count is a citation artifact. The semantic Ground Truth of the center node is Computer Vision. Both categories are in the Candidate Categories list. I must NOT blindly follow the 80% majority.
 </think>
-<summary>Despite the 80% NLP topological majority, textual verification proves the center node applies transformers to images. It perfectly aligns with the Computer Vision representative text, thus overriding the misleading topological prior.</summary>
 <action>final:Computer Vision</action>
 
 ### Example 5.2: Aligning with the Majority (Homophily Holds)
@@ -77,7 +75,6 @@ I am in System 1 (Clear Weather). I must evaluate the texts.
 3. Representative Matching: The Graph Learning representative explicitly discusses "Graph Neural Networks", matching the center node perfectly. The Optimization representative is secondary.
 Conclusion: The topological majority perfectly aligns with the center node's semantic content. I will confidently follow the majority.
 </think>
-<summary>The center node discusses message passing in GNNs, which perfectly aligns with the 90% Graph Learning topological majority and its representative text. The majority is valid and correct.</summary>
 <action>final:Graph Learning</action>
 """
 
@@ -117,8 +114,7 @@ At each step, choose **exactly one** action:
 
 ## 5. Response Format
 1. **<think>...** Detailed Chain of Thought. Analyze shapes, autonomously sample nodes to build evidence, verify hypotheses, and map clusters to the Candidate Categories.
-2. **<summary>...** Summarize your current findings and progress to ground your next action.
-3. **<action>...** One valid command.
+2. **<action>...** One valid command.
 """
 
 SYSTEM2_FEW_SHOT = """
@@ -136,7 +132,6 @@ I need to unlock the gate by identifying and painting the categories for Group 1
 I must gather enough evidence to prove my hypothesis about what these groups represent, which will also help me understand the center node's context.
 I will autonomously sample a mix of high-degree Hubs and 1-hop nodes: Blue Nodes (15, 22) for Group 1, and Red Nodes (8, 30) for Group 2.
 </think>
-<summary>Initiating batch exploration. Checking Blue nodes 15 and 22, and Red nodes 8 and 30 to build sufficient evidence for category identification.</summary>
 <action>check_nodes:[15, 22, 8, 30]</action>
 
 **Observation:** Node 15: "Graph Neural Networks survey..." | Node 22: "Optimizing GNN layers..." | Node 8: "Bioinformatics application of neural networks..." | Node 30: "Molecular property prediction..."
@@ -146,7 +141,6 @@ I will autonomously sample a mix of high-degree Hubs and 1-hop nodes: Blue Nodes
 Both Blue nodes (15, 22) consistently discuss algorithms and GNNs. Looking at the Candidate Categories, "Machine Learning" is the perfect semantic match for 'Group 1'.
 I will fulfill the Group 1 requirement by painting the category 'Machine Learning' for Group 1.
 </think>
-<summary>Evidence is sufficient: Group 1 maps to Machine Learning. Painting the 'Machine Learning' category for Group 1 to satisfy the requirement.</summary>
 <action>paint:Group 1,Machine Learning</action>
 
 **Observation:** [DELAYED FEEDBACK] Group 1 painted as 'Machine Learning'. Correctness hidden. Legend updated.
@@ -155,7 +149,6 @@ I will fulfill the Group 1 requirement by painting the category 'Machine Learnin
 <think>
 Group 1 requirement met. Now I must paint the category for Group 2. My evidence confirmed it is Biomolecular Engineering.
 </think>
-<summary>Group 1 fulfilled. Now painting the verified 'Biomolecular Engineering' category for Group 2 to fulfill the quota.</summary>
 <action>paint:Group 2,Biomolecular Engineering</action>
 
 **Observation:** [DELAYED FEEDBACK] Group 2 painted as 'Biomolecular Engineering'. Correctness hidden. Gate UNLOCKED.
@@ -164,7 +157,6 @@ Group 1 requirement met. Now I must paint the category for Group 2. My evidence 
 <think>
 The environment says Gate UNLOCKED. The center node connects to ML methods (Group 1) and Bio applications (Group 2). Let me quickly check the center node's text to finalize the prediction.
 </think>
-<summary>Gate unlocked. Checking the center node 8712's text to make the final determination.</summary>
 <action>check_node:8712</action>
 
 **Observation:** Node 8712: "We utilize GNNs for fast drug discovery..."
@@ -173,7 +165,6 @@ The environment says Gate UNLOCKED. The center node connects to ML methods (Grou
 <think>
 The center text confirms it uses the computational method for an application (drug discovery). Between the candidate categories, this clearly belongs to Biomolecular Engineering.
 </think>
-<summary>Center text confirms Biomolecular Engineering. Submitting final answer.</summary>
 <action>final:Biomolecular Engineering</action>
 """
 
@@ -192,7 +183,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         super().__init__(envs, projection_f, config)
         
         self._think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
-        self._summary_pattern = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
         self._action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
         
         self.initial_modes = []
@@ -252,25 +242,16 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         return observations, infos
 
     def step(self, text_actions: List[str]):
-        summaries = []
         thinks = []
         
         for raw_text in text_actions:
-            s_match = self._summary_pattern.search(raw_text)
-            if s_match:
-                summaries.append(s_match.group(1).strip())
-            else:
-                summaries.append("No summary provided.")
-            
             t_match = self._think_pattern.search(raw_text)
             if t_match:
                 thinks.append(t_match.group(1).strip())
             else:
-                if s_match:
-                    pre_summary = raw_text.split("<summary>")[0].strip()
-                    thinks.append(pre_summary if pre_summary else None)
-                else:
-                    thinks.append(None)
+                # 如果没有匹配到 <think>，但遇到了 <action>，则截取 action 之前的内容作为 think
+                pre_action = raw_text.split("<action>")[0].strip()
+                thinks.append(pre_action if pre_action else None)
 
         actions, valids = self.projection_f(text_actions)
         next_text_obs, next_image_obs, rewards, dones, infos = self.envs.step(actions)
@@ -293,8 +274,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
 
         self.memory.store({
             "search": actions,
-            "information": next_text_obs,
-            "summary": summaries 
+            "information": next_text_obs
         })
 
         next_observations = {
@@ -306,7 +286,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         for i, info in enumerate(infos):
             info["is_action_valid"] = to_numpy(valids[i])
             info["parsed_think"] = thinks[i]
-            info["parsed_summary"] = summaries[i]
             a_match = self._action_pattern.search(text_actions[i])
             parsed_act_content = a_match.group(1).strip() if a_match else "No Action Found"
             info["parsed_action_content"] = parsed_act_content
@@ -316,7 +295,6 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
                     "step_idx": len(self.episode_trajectories[i]["steps"]) + 1,
                     "model_raw_output": text_actions[i],
                     "parsed_think": thinks[i],
-                    "parsed_summary": summaries[i],
                     "parsed_action": parsed_act_content,
                     "env_executed_action": actions[i],
                     "is_valid_format": bool(valids[i]),

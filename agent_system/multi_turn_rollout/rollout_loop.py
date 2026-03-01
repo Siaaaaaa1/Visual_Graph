@@ -293,7 +293,6 @@ class TrajectoryCollector:
         tool_callings = np.zeros(batch_size, dtype=np.float32)
 
         think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
-        summary_pattern = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
         action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
 
         for _step in range(self.config.env.max_steps):
@@ -379,28 +378,22 @@ class TrajectoryCollector:
                 print(f"\n[Full Model Response]:\n{response_text}")
 
                 think = "N/A"
-                summary = "N/A"
                 action = "N/A"
 
                 if infos and i < len(infos):
                     info = infos[i]
                     think = info.get('parsed_think', None)
-                    summary = info.get('parsed_summary', None)
                     action = info.get('parsed_action_content', None)
                 
                 if not think: 
                     m = think_pattern.search(response_text)
                     think = m.group(1).strip() if m else "Not Found"
-                if not summary:
-                    m = summary_pattern.search(response_text)
-                    summary = m.group(1).strip() if m else "Not Found"
                 if not action or action == "No Action Found":
                     m = action_pattern.search(response_text)
                     action = m.group(1).strip() if m else "Not Found"
 
                 print(f"\n[Parsed Structure]")
                 print(f"  > Think: {think}")
-                print(f"  > Summary: {summary}")
                 print(f"  > Action: {action}")
 
                 raw_env_feedback = next_obs['anchor'][i]
@@ -414,7 +407,6 @@ class TrajectoryCollector:
 
             if infos:
                 batch.non_tensor_batch['parsed_think'] = np.array([info.get('parsed_think', '') for info in infos], dtype=object)
-                batch.non_tensor_batch['parsed_summary'] = np.array([info.get('parsed_summary', '') for info in infos], dtype=object)
                 batch.non_tensor_batch['parsed_action'] = np.array([info.get('parsed_action_content', '') for info in infos], dtype=object)
 
             if 'is_action_valid' in infos[0]:
@@ -463,7 +455,6 @@ class TrajectoryCollector:
                     )
         
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
-  
             
     def dynamic_multi_turn_loop(
             self,

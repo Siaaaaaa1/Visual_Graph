@@ -13,7 +13,7 @@ class EpisodeRewardManager:
         self.normalize_by_length = normalize_by_length
         # 预编译正则，提高效率 (宽松匹配：允许标签间有换行或空白)
         self.format_pattern = re.compile(
-            r"(?:<think>)?.*?</think>.*<summary>.*?</summary>.*<action>.*?</action>", 
+            r"(?:<think>)?.*?</think>.*<action>.*?</action>", 
             re.DOTALL | re.IGNORECASE
         )
                 
