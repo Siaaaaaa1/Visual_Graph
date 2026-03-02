@@ -23,6 +23,10 @@ class GraphSearchEnv:
         self.current_image = None
         self.valid_nodes_in_view = set()
         
+        # [修复核心] 新增状态缓存，记录最后一次的输赢与失败原因
+        self.is_won = False
+        self.failure_reason = "Timeout"
+        
     def _get_title_and_abstract(self, raw_text: str) -> Tuple[str, str]:
         parts = raw_text.split("Abstract:", 1)
         title_part = parts[0].replace("Title:", "").strip()
@@ -73,10 +77,21 @@ class GraphSearchEnv:
         current_action = raw_input.strip()
         img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024,1024,3), dtype=np.uint8)
 
+        # [修复 1] 如果回合已经结束，返回缓存的最终状态 (修复 Padding KeyError)
         if self.done:
-             return "Episode already finished.", img_ret, 0.0, True, {"parsed_action": "ERROR"}
+             return "Episode already finished.", img_ret, 0.0, True, {
+                 "parsed_action": "ERROR", 
+                 "won": self.is_won, 
+                 "failure_reason": self.failure_reason
+             }
+             
+        # [修复 2] 格式错误校验 (保证带有 won 键)
         if not current_action:
-            return "[System] Invalid format. Wrap action in <action>...</action>.", img_ret, -0.1, False, {"parsed_action": "ERROR", "failure_reason": "Format_Error"}
+            return "[System] Invalid format. Wrap action in <action>...</action>.", img_ret, -0.1, False, {
+                "parsed_action": "ERROR", 
+                "won": False, 
+                "failure_reason": "Format_Error"
+            }
 
         check_match = re.search(r"check_nodes?\(\[?([\d,\s]+)\]?\)", current_action, re.IGNORECASE)
         final_match = re.search(r"(?:final|submit)\((.+?)\)", current_action, re.IGNORECASE)
@@ -93,7 +108,14 @@ class GraphSearchEnv:
             # RL 预算控制
             if self.check_node_count + new_checks > self.max_budget:
                 self.done = True
-                return f"严重违规：累计查阅超出预算极限 ({self.max_budget})！任务强制终止。", img_ret, -1.0, True, {"parsed_action": current_action, "failure_reason": "Budget_Exceeded"}
+                self.is_won = False
+                self.failure_reason = "Budget_Exceeded"
+                # [修复 3] 补齐预算超标分支所需的键值
+                return f"严重违规：累计查阅超出预算极限 ({self.max_budget})！任务强制终止。", img_ret, -1.0, True, {
+                    "parsed_action": current_action, 
+                    "won": self.is_won, 
+                    "failure_reason": self.failure_reason
+                }
 
             obs_lines = []
             for tid in target_ids:
@@ -131,16 +153,26 @@ class GraphSearchEnv:
             obs = "无效动作格式，请检查拼写。"
             reward = -0.1
 
+        # [修复 4] 梳理末尾的失败原因逻辑并更新状态缓存
         failure_reason = "Success"
         if self.done and reward < 1.0:
             if final_match:
                 failure_reason = "Wrong_Answer_Blind" if self.check_node_count == 0 else "Wrong_Answer"
-            elif "Budget_Exceeded" not in locals().get('failure_reason', ''):
-                failure_reason = "Timeout"
+            else:
+                failure_reason = "Timeout" # 在上方的判定中，Budget Exceeded 已经 Early Return 了
 
-        info = {"step": self.step_count, "won": (reward == 1.0), "parsed_action": current_action, "failure_reason": failure_reason}
+        if self.done:
+            self.is_won = (reward == 1.0)
+            self.failure_reason = failure_reason
+
+        info = {
+            "step": self.step_count, 
+            "won": (reward == 1.0), 
+            "parsed_action": current_action, 
+            "failure_reason": failure_reason
+        }
         return obs, img_ret, reward, self.done, info
-    
+
 def build_graph_search_envs(seed: int, env_num: int, group_n: int, is_train: bool, env_config):
     batch_size = env_num * group_n
     max_steps = env_config.max_steps
