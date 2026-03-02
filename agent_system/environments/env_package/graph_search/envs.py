@@ -7,490 +7,139 @@ from PIL import Image
 from concurrent.futures import ThreadPoolExecutor
 from .graph_visualizer import GraphVisualizer
 import re
-from collections import Counter
 
 class GraphSearchEnv:
-    """
-    图搜索智能体环境类。
-    用于管理单个大模型智能体在图数据上的探索、动作交互、奖励计算以及视觉图像的生成。
-    """
-    def __init__(self, 
-                 max_steps: int, 
-                 node_text_db: Dict[str, str], 
-                 dataset_name: str, 
-                 dataset_dir: str,
-                 graph_setting: str = "standard_20", 
-                 shared_graph_data: Optional[Tuple[Dict, Dict, Dict, Any]] = None,
-                 tau: float = 0.4,
-                 epsilon: float = 0.15): 
+    def __init__(self, max_steps: int, node_text_db: Dict[str, str], dataset_name: str, dataset_dir: str, shared_graph_data: Optional[Any] = None): 
         self.max_steps = max_steps
         self.node_text_db = node_text_db
-        self.graph_setting = graph_setting
-        self.tau = tau
-        self.epsilon = epsilon
-        self.visualizer = GraphVisualizer(
-            dataset_name=dataset_name, 
-            dataset_dir=dataset_dir,
-            shared_data=shared_graph_data
-        )
+        self.visualizer = GraphVisualizer(dataset_name=dataset_name, dataset_dir=dataset_dir, shared_data=shared_graph_data)
+        self.max_budget = 5 # 单个 Episode 全局最多允许查阅的节点数
         self._reset_internal()
 
     def _reset_internal(self):
         self.step_count = 0
-        self.seen_nodes = set()
+        self.check_node_count = 0
         self.done = False
         self.current_image = None
-        self.episode_color_seed = random.randint(0, 1000000)
-        self.paint_history = {} 
-        self.painted_groups = {}
-        self.mode = "System1"
-        self.required_classes = set()
-        self.anon_map = {}
-        self.color_mapping = {}
-
-    def _format_legend(self, legend_dict: Dict[str, str]) -> str:
-        items = [f"{color}: {cls}" for color, cls in legend_dict.items()]
-        items.sort(key=lambda x: 0 if "Black" in x else 1)
-        return "; ".join(items)
+        self.valid_nodes_in_view = set()
+        
+    def _get_title_and_abstract(self, raw_text: str) -> Tuple[str, str]:
+        parts = raw_text.split("Abstract:", 1)
+        title_part = parts[0].replace("Title:", "").strip()
+        abstract_part = parts[1].strip() if len(parts) > 1 else "No abstract."
+        return title_part, abstract_part
 
     def reset(self, kwargs: Dict[str, Any]) -> str:
         self._reset_internal()
         self.center_id = kwargs["center_id"]
         self.answer = kwargs["answer"]
-        is_train = kwargs.get("is_train", True)
 
-        center_info = self.visualizer._get_node_info(self.center_id)
+        # 生成零文本同心圆雷达图
+        img_bytes, node_catalog_info, all_classes = self.visualizer.draw_vgraph_radar_layout(int(self.center_id))
+        self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024), Image.Resampling.LANCZOS))
         
-        neighbors_1hop = set(self.visualizer._get_neighbors(self.center_id, undirected=True))
-        all_neighbors_1_2_hop = set(neighbors_1hop)
-        for nb in neighbors_1hop:
-            all_neighbors_1_2_hop.update(self.visualizer._get_neighbors(nb, undirected=True))
+        for real_id in node_catalog_info.keys():
+            self.valid_nodes_in_view.add(int(real_id))
             
-        if self.center_id in all_neighbors_1_2_hop:
-            all_neighbors_1_2_hop.remove(self.center_id)
+        # 提取中心节点的核心先验信息
+        center_raw_text = self.node_text_db.get(str(self.center_id), "Title: Unknown\nAbstract: None")
+        center_title, _ = self._get_title_and_abstract(center_raw_text)
         
-        # 使用 Margin of Victory (断层优势) 计算同质性
-        neighbor_classes = []
-        for nb in all_neighbors_1_2_hop:
-            tc = self.visualizer._get_node_info(nb)["true_class"]
-            neighbor_classes.append(tc)
-            
-        if len(neighbor_classes) > 0:
-            class_counts = Counter(neighbor_classes)
-            top_classes = class_counts.most_common(2)
-            
-            top1_ratio = top_classes[0][1] / len(neighbor_classes)
-            top2_ratio = top_classes[1][1] / len(neighbor_classes) if len(top_classes) > 1 else 0.0
-            
-            margin = top1_ratio - top2_ratio
-        else:
-            margin = 0.0 # 孤立节点直接进 System 2
+        proxy_data = self.visualizer._get_node_info(self.center_id).get("proxy_info", {})
+        center_proxy = proxy_data.get("top1", "Unknown")
 
-        if margin >= self.tau:
-            if is_train and random.random() < self.epsilon:
-                self.mode = "System2"
-            else:
-                self.mode = "System1"
-        else:
-            self.mode = "System2"
-
-        init_view_mode = "2-hop+sim"
-        init_max_nodes = 30
-
-        # 获取画面节点
-        view_nodes = self.visualizer._select_nodes(self.center_id, init_view_mode, init_max_nodes, undirected=True)
+        candidates_str = ", ".join(all_classes)
         
-        # 解析相对高度数的 Top-3
-        node_degrees = {}
-        for nid in view_nodes:
-            if nid == self.center_id: continue
-            deg = self.visualizer.get_node_degree_info(nid)
-            node_degrees[nid] = deg['out_degree'] + deg['in_degree']
-        sorted_by_deg = sorted(node_degrees.items(), key=lambda x: x[1], reverse=True)
-        self.top3_hubs = set([nid for nid, _ in sorted_by_deg[:3]])
-
-        # 统计可视范围内的真实类别分布
-        valid_view_nodes = [n for n in view_nodes if n != self.center_id]
-        class_counts_view = {}
-        for nid in valid_view_nodes:
-            tc = self.visualizer._get_node_info(nid)["true_class"]
-            class_counts_view[tc] = class_counts_view.get(tc, 0) + 1
-            
-        prioritized_classes = sorted(class_counts_view.keys(), key=lambda tc: class_counts_view[tc], reverse=True)
-        
-        all_classes = self.visualizer.get_all_candidate_classes()
-        all_classes_set = set(all_classes)
-        for tc in prioritized_classes:
-            all_classes_set.add(tc)
-        all_classes = sorted(list(all_classes_set))
-
-        self.color_mapping = self.visualizer._get_color_map_for_episode(
-            all_classes, 
-            self.episode_color_seed,
-            prioritized_classes=prioritized_classes
-        )
-        
-        self.anon_map = {}
-        for i, cls in enumerate(prioritized_classes):
-            self.anon_map[cls] = f"Group {i+1}"
-            
-        curr_group_id = len(prioritized_classes) + 1
-        for cls in all_classes:
-            if cls not in self.anon_map:
-                self.anon_map[cls] = f"Group {curr_group_id}"
-                curr_group_id += 1
-
-        gate_instruction = ""
-        if self.mode == "System1":
-            mask_neighbors_init = False
-            self.center_text = self.node_text_db.get(str(self.center_id), "No text available.")
-        else:
-            mask_neighbors_init = True
-            self.center_text = "[Text Hidden by Fog of War. Colors group similar nodes, but legend labels are anonymized. Explore to deduce meaning.]"
-            
-            threshold = len(valid_view_nodes) * 0.1
-            top4_qualified = []
-            for tc in prioritized_classes:
-                if class_counts_view[tc] >= threshold:
-                    top4_qualified.append(tc)
-                    if len(top4_qualified) == 4:
-                        break
-                        
-            self.required_classes = set(top4_qualified)
-            
-            for tc in self.required_classes:
-                if tc not in self.anon_map:
-                    self.anon_map[tc] = f"Group {len(self.anon_map) + 1}"
-                    
-            req_groups = sorted([self.anon_map[tc] for tc in self.required_classes])
-            
-            if req_groups:
-                needed_count = max(1, len(self.required_classes) // 2 + (len(self.required_classes) % 2))
-                gate_instruction = f"🚨 GATE REQUIREMENT: You must correctly paint AT LEAST {needed_count} of these Major Clusters: [{', '.join(req_groups)}]. (Groups <10% or beyond top 4 are ignored)."
-            else:
-                gate_instruction = f"🚨 GATE REQUIREMENT: Highly fragmented graph. Paint ANY 1 correct Group to unlock the gate."
-
-        stats = self.visualizer.get_node_degree_info(self.center_id)
-        
-        visible_classes_set = set(class_counts_view.keys())
-        center_tc = self.visualizer._get_node_info(self.center_id)["true_class"]
-        visible_classes_set.add(center_tc)
-        
-        visible_classes = sorted(list(visible_classes_set))
-        candidates_str = ", ".join(visible_classes) if visible_classes else "Unknown"
-        
-        img_bytes, legend_dict = self.visualizer.draw_subgraph(
-            self.center_id, 
-            view_mode=init_view_mode,
-            max_nodes=init_max_nodes,
-            color_seed=self.episode_color_seed,
-            mask_neighbors=mask_neighbors_init,
-            painted_nodes={},
-            color_mapping=self.color_mapping,
-            anon_map=self.anon_map
-        )
-        
-        pil_img = Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024), Image.Resampling.LANCZOS)
-        self.current_image = np.array(pil_img)
-        
-        mode_desc = "CLEAR WEATHER (System 1)" if self.mode == "System1" else "FOG OF WAR: ANONYMOUS COLORS (System 2)"
-
-        neighbor_text_block = ""
-        if self.mode == "System1":
-            class_to_nodes = {}
-            for nid in view_nodes:
-                if nid == self.center_id: continue
-                tc = self.visualizer._get_node_info(nid)["true_class"]
-                if tc not in class_to_nodes:
-                    class_to_nodes[tc] = []
-                class_to_nodes[tc].append(nid)
-
-            selected_nbs = []
-            selected_nids_set = set()
-            
-            for idx, tc in enumerate(prioritized_classes):
-                if tc not in class_to_nodes:
-                    continue
-                nids = class_to_nodes[tc]
-                
-                if idx == 0:
-                    max_quota = 3     
-                elif idx in [1, 2]:
-                    max_quota = 2     
-                else:
-                    max_quota = 1     
-                
-                sorted_nids = sorted(nids, key=lambda x: (x not in neighbors_1hop, -node_degrees.get(x, 0)))
-                
-                rep_count = min(max_quota, len(sorted_nids))
-                for i in range(rep_count):
-                    nid = sorted_nids[i]
-                    hop_str = "1-hop" if nid in neighbors_1hop else "2-hop/Sim"
-                    label = f"Representative for {tc} ({hop_str})"
-                    selected_nbs.append((nid, label))
-                    selected_nids_set.add(nid)
-                    
-            for nid in self.top3_hubs:
-                if nid not in selected_nids_set and nid != self.center_id:
-                    hop_str = "1-hop" if nid in neighbors_1hop else "2-hop/Sim"
-                    label = f"Global High-Degree Hub ({hop_str})"
-                    selected_nbs.append((nid, label))
-                    selected_nids_set.add(nid)
-                
-            if selected_nbs:
-                neighbor_text_block = "--- Supplementary Neighbors Context (Fast Thinking View) ---\n"
-                for nid, n_type in selected_nbs:
-                    txt = self.node_text_db.get(str(nid), "No text available.")[:300].replace('\n', ' ')
-                    neighbor_text_block += f"- [{n_type} | Node {nid}]: {txt}...\n"
-                neighbor_text_block += "------------------------------------------------------------\n\n"
-
+        # 零文本机制 (Zero-Text Catalog)：不给任何邻居摘要，强迫看图
         obs = (
-            f"=== Environment Mode: {mode_desc} ===\n"
-            f"Current Agent Task: Classify the Target Center Node {self.center_id}.\n\n"
-            f"🎯 TARGET CENTER NODE {self.center_id} INFO:\n"
-            f"============================================================\n"
-            f"{self.center_text}\n"
-            f"============================================================\n"
-            f"Topology -> In-Degree: {stats['in_degree']}, Out-Degree: {stats['out_degree']}\n\n"
-            f"{neighbor_text_block}"
-            f"{gate_instruction}\n\n"
-            f"Candidate Categories: {candidates_str}\n\n"
-            f"Legend: {self._format_legend(legend_dict)}\n"
-            f"Visual Shapes: ◯ = 1-hop/Other, ▼ = High Out-degree (Top 3), ▲ = High In-degree (Top 3)"
+            f"🎯 任务：请预测目标中心节点 **{self.center_id}** 的准确类别。\n\n"
+            f"【中心节点基础先验】\n"
+            f"* Title: {center_title}\n"
+            f"* Initial Proxy Prediction (60% confidence): {center_proxy}\n\n"
+            f"【操作指南】\n"
+            f"图上展示了其局部结构的同心圆雷达图（内圈1-hop，外圈Hubs），颜色代表特征相似度，形状代表拓扑度数。\n"
+            f"你可以结合视觉发现，调用查阅动作：`<action>check_nodes([ID1, ID2])</action>`，单次最多查 5 个。\n"
+            f"注意：你的探索预算极度有限！累计查阅超过 {self.max_budget} 个节点将被强制结束。如果不查阅盲猜失败将扣 -2.0 分。\n\n"
+            f"可选类别: [{candidates_str}]\n"
         )
 
-        infos = {"center_id": self.center_id, "answer": self.answer, "step": self.step_count, "mode": self.mode, "won": False}
+        infos = {"center_id": self.center_id, "answer": self.answer, "step": self.step_count, "mode": "V-GraphAgent"}
         return obs, self.current_image, infos
 
     def step(self, raw_input: str):
         self.step_count += 1
         reward = 0.0
-        done = False
         obs = ""
         current_action = raw_input.strip()
+        img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024,1024,3), dtype=np.uint8)
 
-        if not current_action or self.done:
-            img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024,1024,3), dtype=np.uint8)
-            return ("Invalid format" if not self.done else ""), img_ret, -0.1 if not self.done else 0.0, self.done, {
-                "parsed_action": "ERROR", 
-                "won": False, 
-                "step": self.step_count
-            }
+        if self.done:
+             return "Episode already finished.", img_ret, 0.0, True, {"parsed_action": "ERROR"}
+        if not current_action:
+            return "[System] Invalid format. Wrap action in <action>...</action>.", img_ret, -0.1, False, {"parsed_action": "ERROR", "failure_reason": "Format_Error"}
 
-        if current_action.startswith("check_node:") or current_action.startswith("check_nodes:"):
-            if self.mode == "System1":
-                obs = "System 1 Violation: You are not allowed to explore in Clear Weather. Directly submit the answer."
-                reward = -0.1 
-            else:
-                try:
-                    node_ids = [int(p) for p in re.findall(r"\d+", current_action)]
-                    texts = []
-                    for node_id in node_ids[:5]:
-                        self.seen_nodes.add(node_id)
-                        texts.append(f"Node {node_id} Text:\n{self.node_text_db.get(str(node_id), 'No text available.')[:400]}")
-                    obs = "\n\n".join(texts)
-                    reward = 0.0 
-                except Exception:
-                    obs = "Error parsing check_node ids."
-                    reward = -0.1
+        check_match = re.search(r"check_nodes?\(\[?([\d,\s]+)\]?\)", current_action, re.IGNORECASE)
+        final_match = re.search(r"(?:final|submit)\((.+?)\)", current_action, re.IGNORECASE)
 
-        elif current_action.startswith("paint:"):
-            if self.mode == "System1":
-                obs = "System 1 Violation: Paint is disabled in Clear Weather."
-                reward = -0.1
-            else:
-                try:
-                    parts = current_action.split(":", 1)[1].split(",", 1)
-                    target_group = parts[0].strip()
-                    cls = parts[1].strip()
-                    
-                    valid_group = None
-                    gt_cls = None
-                    for tc, anon in self.anon_map.items():
-                        if anon.lower() == target_group.lower():
-                            valid_group = anon
-                            gt_cls = tc
-                            break
-                            
-                    if valid_group:
-                        norm_pred = cls.lower().strip().strip(".'\"")
-                        norm_gt = gt_cls.lower().strip().strip(".'\"")
-                        
-                        # 获取该组当前的涂色状态
-                        current_paint = self.painted_groups.get(valid_group)
-                        current_norm = current_paint.lower().strip().strip(".'\"") if current_paint else None
-                        
-                        # 【核心优化】：如果本次涂色和当前已有的涂色完全一致，则拦截防刷分
-                        if current_norm == norm_pred:
-                            obs = f"[INVALID] {valid_group} is already painted as '{cls}'. Prevent Farming constraint triggered."
-                            reward = -0.1 
-                        else:
-                            # 允许涂色（首次涂色 或 纠错覆盖）
-                            action_word = "repainted" if current_paint else "painted"
-                            self.paint_history[self.step_count] = (valid_group, cls)
-                            self.painted_groups[valid_group] = cls # 更新/覆盖最新状态
-                            obs = f"[DELAYED FEEDBACK] {valid_group} {action_word} as '{cls}'. Map updated. Correctness hidden."
-                            
-                            if norm_pred == norm_gt:
-                                reward = 0.1
-                            else:
-                                reward = -0.1
-                    else:
-                        obs = f"Invalid group name '{target_group}'. Please use names like 'Group 1'."
-                        reward = -0.1
-
-                    legend_dict = {}
-                    for tc, c_conf in self.color_mapping.items():
-                        color_name = c_conf["name"]
-                        if self.mode == "System2":
-                            anon_name = self.anon_map.get(tc, "Unknown Group")
-                            if anon_name in self.painted_groups:
-                                pred_class = self.painted_groups[anon_name]
-                                legend_dict[color_name] = f"Painted: {pred_class}"
-                            else:
-                                legend_dict[color_name] = f"Anonymous: {anon_name}"
-                        else:
-                            legend_dict[color_name] = tc
-                    
-                    obs += f"\nLegend: {self._format_legend(legend_dict)}"
-
-                except Exception:
-                    obs = "Invalid paint format. Use paint:Group Name,Category"
-                    reward = -0.1
-
-        elif current_action.startswith("check_graph:"):
-            if self.mode == "System1":
-                obs = "System 1 Violation: Graph manipulation disabled. Submit directly."
-                reward = -0.1
-            else:
-                try:
-                    params = current_action.split(":", 1)[1].strip().split(",")
-                    v_mode, max_n = params[0].strip(), int(params[1].strip())
-                    img_bytes, legend_dict = self.visualizer.draw_subgraph(
-                        self.center_id, view_mode=v_mode, max_nodes=max_n, 
-                        color_seed=self.episode_color_seed, mask_neighbors=True, 
-                        painted_nodes={}, 
-                        color_mapping=self.color_mapping, anon_map=self.anon_map
-                    )
-                    self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024)))
-                    obs = f"Graph view updated. Legend: {self._format_legend(legend_dict)}"
-                    reward = 0.0
-                except Exception:
-                    obs = "Invalid check_graph format."
-                    reward = -0.1
-                    
-        elif current_action.startswith("final:") or current_action.startswith("submit:"):
-            try:
-                pred = current_action.split(":", 1)[1].strip()
-                is_correct = (pred.lower().strip().strip(".'\"") == self.answer.lower().strip().strip(".'\""))
+        if check_match:
+            ids_str = check_match.group(1)
+            target_ids = [int(x.strip()) for x in ids_str.split(',') if x.strip().isdigit()]
+            
+            if len(target_ids) > 5:
+                target_ids = target_ids[:5] # 限制单步最大请求数
                 
-                if self.mode == "System1":
-                    done = True
-                    self.done = True
-                    reward = 1.0 if is_correct else -1.0
-                    obs = "System 1 Final answer submitted."
+            new_checks = len(target_ids)
+            
+            # RL 预算控制
+            if self.check_node_count + new_checks > self.max_budget:
+                self.done = True
+                return f"严重违规：累计查阅超出预算极限 ({self.max_budget})！任务强制终止。", img_ret, -1.0, True, {"parsed_action": current_action, "failure_reason": "Budget_Exceeded"}
+
+            obs_lines = []
+            for tid in target_ids:
+                if tid in self.valid_nodes_in_view:
+                    raw_text = self.node_text_db.get(str(tid), "Title: Unknown\nAbstract: not found.")
+                    title, abstract = self._get_title_and_abstract(raw_text)
+                    obs_lines.append(f"--- Node {tid} ---\nTitle: {title}\nAbstract: {abstract}")
+                    
+                    # 动态探索阶梯成本
+                    self.check_node_count += 1
+                    if self.check_node_count > 2:
+                        reward += -0.05 # 查过两个后，后续每一个罚 0.05
                 else:
-                    painted_tcs = set()
-                    for grp, pred_class in self.painted_groups.items():
-                        for tc, anon in self.anon_map.items():
-                            if anon.lower() == grp.lower():
-                                norm_pred = pred_class.lower().strip().strip(".'\"")
-                                norm_tc = tc.lower().strip().strip(".'\"")
-                                if norm_pred == norm_tc:
-                                    painted_tcs.add(tc)
-                                break
-                    
-                    if len(self.required_classes) == 0:
-                        is_unlocked = len(painted_tcs) >= 1
-                    else:
-                        required_count = len(self.required_classes)
-                        needed_count = max(1, required_count // 2 + (required_count % 2)) 
-                        correct_required = len(painted_tcs.intersection(self.required_classes))
-                        
-                        is_unlocked = correct_required >= needed_count
-                    
-                    if is_unlocked:
-                        done = True
-                        self.done = True
-                        if is_correct:
-                            reward = 1.0 
-                            obs = f"Gate UNLOCKED. Final answer CORRECT!"
-                        else:
-                            reward = -1.0
-                            obs = f"Gate UNLOCKED. Final answer WRONG."
-                    else:
-                        done = False
-                        reward = -0.1 
-                        missing_classes = self.required_classes - painted_tcs
-                        if len(self.required_classes) == 0:
-                            missing_str = "ANY 1 correct Group"
-                            obs = f"Action Failed: Logic Gate Locked. You still need to paint: [{missing_str}]."
-                        else:
-                            missing_groups = sorted([self.anon_map[tc] for tc in missing_classes])
-                            missing_str = ", ".join(missing_groups)
-                            needed_more = needed_count - correct_required
-                            obs = f"Action Failed: Logic Gate Locked. You need to correctly paint at least {needed_more} more from the remaining required groups: [{missing_str}]."
-            except Exception:
-                obs = "Invalid submit format."
-                reward = -0.1
+                    obs_lines.append(f"错误：节点 {tid} 不在当前雷达视野内。")
+                    reward += -0.1
+            
+            obs = "\n\n".join(obs_lines)
+
+        elif final_match:
+            pred = final_match.group(1).strip()
+            is_correct = (pred.lower() == self.answer.lower())
+            self.done = True
+            
+            if is_correct:
+                reward = 1.0
+                obs = "预测正确！"
+            else:
+                if self.check_node_count == 0:
+                    reward = -2.0  # 致命的盲目自信惩罚
+                    obs = "预测错误！致命惩罚：未查阅任何视图证据即盲听先验。"
+                else:
+                    reward = -1.0
+                    obs = "预测错误。"
         else:
-            obs = f"Invalid action command."
+            obs = "无效动作格式，请检查拼写。"
             reward = -0.1
 
-        # ---------------------------------------------------------
-        # [新增逻辑]：判定失败原因 (Failure Reason Tracking)
-        # ---------------------------------------------------------
-        if not done and self.step_count >= self.max_steps:
-            done = True
-            self.done = True
-            reward = -1.0
-            
         failure_reason = "Success"
-        if done and reward < 1.0: # 如果是失败的结局
-            is_final_action = current_action.startswith("final:") or current_action.startswith("submit:")
-            
-            if self.mode == "System1":
-                if is_final_action:
-                    failure_reason = "Sys1_Wrong_Answer"
-                else:
-                    failure_reason = "Sys1_Timeout"
-            else: # System 2
-                # 判断当前门是否处于解锁状态 (复用你之前的软匹配逻辑判定)
-                painted_tcs = set()
-                for grp, pred_class in self.painted_groups.items():
-                    for tc, anon in self.anon_map.items():
-                        if anon.lower() == grp.lower():
-                            if pred_class.lower().strip().strip(".'\"") == tc.lower().strip().strip(".'\""):
-                                painted_tcs.add(tc)
-                            break
-                is_unlocked = False
-                if len(self.required_classes) == 0:
-                    is_unlocked = len(painted_tcs) >= 1
-                else:
-                    needed_count = max(1, len(self.required_classes) // 2 + (len(self.required_classes) % 2))
-                    correct_required = len(painted_tcs.intersection(self.required_classes))
-                    is_unlocked = correct_required >= needed_count
+        if self.done and reward < 1.0:
+            if final_match:
+                failure_reason = "Wrong_Answer_Blind" if self.check_node_count == 0 else "Wrong_Answer"
+            elif "Budget_Exceeded" not in locals().get('failure_reason', ''):
+                failure_reason = "Timeout"
 
-                if is_final_action:
-                    if not is_unlocked:
-                        failure_reason = "Sys2_Premature_Submit" # 没解锁就抢答
-                    else:
-                        failure_reason = "Sys2_Wrong_Answer"     # 解锁了但答错
-                else:
-                    if is_unlocked:
-                        failure_reason = "Sys2_Timeout_Unlocked" # 解锁了但没步数提交了
-                    else:
-                        failure_reason = "Sys2_Timeout_Locked"   # 超时且没解锁
-        # ---------------------------------------------------------
-
-        info = {
-            "step": self.step_count,
-            "won": bool(reward == 1.0) if done else False,
-            "parsed_action": current_action,
-            "failure_reason": failure_reason  # 将失败原因传给上层
-        }
-
-        return obs, self.current_image.copy() if self.current_image is not None else None, reward, done, info
+        info = {"step": self.step_count, "won": (reward == 1.0), "parsed_action": current_action, "failure_reason": failure_reason}
+        return obs, img_ret, reward, self.done, info
     
 def build_graph_search_envs(seed: int, env_num: int, group_n: int, is_train: bool, env_config):
     batch_size = env_num * group_n

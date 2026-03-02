@@ -78,6 +78,9 @@ class TrajectoryCollector:
             except Exception as e:
                 print(f"[Warning] Failed to save debug image: {e}")
 
+        # =========================================================
+        # [NEW] 兼容原生多轮对话格式
+        # =========================================================
         if isinstance(obs_text, list):
             chat = obs_text
         else:
@@ -181,6 +184,7 @@ class TrajectoryCollector:
         })
 
         if self.config.data.get('return_raw_chat', False):
+            # [NEW] 修复原生 list 没有 tolist 属性的报错
             row_dict['raw_prompt'] = chat.tolist() if hasattr(chat, 'tolist') else chat
         
         return row_dict
@@ -211,6 +215,7 @@ class TrajectoryCollector:
         )
 
         return new_batch
+
 
     def gather_rollout_data(
             self,
@@ -257,6 +262,7 @@ class TrajectoryCollector:
             ) -> DataProto:
 
         batch_size = len(gen_batch.batch)
+
         env_kwargs = gen_batch.non_tensor_batch.get('env_kwargs', None)
         
         if env_kwargs is None:
@@ -297,6 +303,7 @@ class TrajectoryCollector:
             input_prompts = batch.non_tensor_batch.get('final_prompt_text', [""] * batch_size)
             truncation_flags = batch.non_tensor_batch.get('is_truncated', [False] * batch_size)
             truncated_texts = batch.non_tensor_batch.get('truncated_text', [""] * batch_size)
+            
             image_inputs = batch.non_tensor_batch.get('multi_modal_inputs', None)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
@@ -424,11 +431,6 @@ class TrajectoryCollector:
 
             for i in range(batch_size):
                 batch_list[i]['step_reward'] = float(rewards[i] if np.isscalar(rewards[i]) else rewards[i].item())
-                
-                # [修复 5] 内存泄漏防线：在存入长期历史前，显式弹出所有多模态大张量对象
-                batch_list[i].pop('multi_modal_inputs', None)
-                batch_list[i].pop('multi_modal_data', None)
-
                 total_batch_list[i].append(batch_list[i])
                 total_infos[i].append(infos[i])
 
@@ -456,12 +458,16 @@ class TrajectoryCollector:
                     episode_lengths=episode_lengths,
                     )
         
+        # ---------------------------------------------------------
+        # [新增日志输出]：实时统计本 Batch 的失败原因分布
+        # ---------------------------------------------------------
         failure_stats = {}
         total_failures = 0
         
         for i in range(batch_size):
-            if episode_rewards[i] < 1.0: 
+            if episode_rewards[i] < 1.0: # 如果这条轨迹失败了
                 total_failures += 1
+                # 获取该轨迹最后一步的 info 中的 failure_reason
                 last_info = total_infos[i][-1] if total_infos[i] else {}
                 reason = last_info.get("failure_reason", "Unknown")
                 failure_stats[reason] = failure_stats.get(reason, 0) + 1
@@ -469,11 +475,13 @@ class TrajectoryCollector:
         if total_failures > 0:
             print(f"\n{'='*20} BATCH FAILURE ANALYSIS {'='*20}")
             print(f"Total Failures in this batch: {total_failures}/{batch_size}")
+            # 按数量降序打印
             sorted_fails = sorted(failure_stats.items(), key=lambda x: x[1], reverse=True)
             for reason, count in sorted_fails:
                 percentage = (count / total_failures) * 100
                 print(f"  - {reason:<25}: {count:<4} ({percentage:.1f}%)")
             print("="*64 + "\n")
+        # ---------------------------------------------------------
         
         return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
             
@@ -584,6 +592,9 @@ class TrajectoryCollector:
                 print("   ⚠️ WARNING: Zero Variance! Advantages collapsed to 0.")
             print("-" * 50)
 
+        # =========================================================
+        # [NEW] Mode-wise Statistics & Random Trajectory Logger
+        # =========================================================
         if total_batch_list is not None and total_success is not None:
             flat_advantages = advantages.flatten().cpu().numpy()
             flat_rewards = rewards.flatten().cpu().numpy()
@@ -594,10 +605,12 @@ class TrajectoryCollector:
                 "System2": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []}
             }
 
+            # 归类统计数据
             for i in range(len(total_batch_list)):
                 mode = env_modes[i] if i < len(env_modes) else "Unknown"
                 if mode not in stats: continue
                 
+                # 判断成功与否 (根据业务逻辑，>=1.0 视为成功，你可以按需调整阈值)
                 is_success = outcomes[i] >= 1.0  
                 if is_success:
                     stats[mode]["success"] += 1
@@ -607,10 +620,12 @@ class TrajectoryCollector:
                 stats[mode]["advs"].append(flat_advantages[i])
                 stats[mode]["traj_indices"].append(i)
 
+                # 提取每一步的 reward
                 for step_data in total_batch_list[i]:
                     if step_data.get('active_masks', True):
                         stats[mode]["step_rewards"].append(step_data.get('step_reward', 0.0))
 
+            # 打印统计信息
             print("\n📊 [Mode-wise Detailed Statistics]")
             for mode in ["System1", "System2"]:
                 s = stats[mode]
@@ -626,6 +641,7 @@ class TrajectoryCollector:
                 print(f"   - Mean Advantage: {mean_adv:.4f}")
                 print(f"   - Mean Step Reward: {mean_step_rew:.4f}")
 
+            # 打印随机轨迹全过程
             print("\n🎲 [Random Trajectory Samples (Filtered <|image_pad|>)]")
             import random
             for mode in ["System1", "System2"]:
@@ -642,6 +658,7 @@ class TrajectoryCollector:
                 for step_idx, step_data in enumerate(traj_steps):
                     if not step_data.get('active_masks', True):
                         continue
+                    # 获取文本并去掉 <|image_pad|>
                     prompt = str(step_data.get('final_prompt_text', '')).replace('<|image_pad|>', '')
                     response = str(step_data.get('model_response_text', '')).replace('<|image_pad|>', '')
                     step_reward = step_data.get('step_reward', 0.0)
@@ -673,8 +690,12 @@ class TrajectoryCollector:
         
         assert len(total_batch_list) == len(total_episode_rewards)
 
+        # =========================================================
+        # [NEW] Absolute Filtering Logic & GRPO Advantage Injection
+        # =========================================================
         group_size = self.config.env.rollout.n
         
+        # 1. 默认初始化标记
         if is_train:
             for i in range(len(total_batch_list)):
                 for step_data in total_batch_list[i]:
@@ -689,6 +710,7 @@ class TrajectoryCollector:
                 for i in range(0, len(outcomes), group_size):
                     group_slice = outcomes[i : i + group_size]
                     
+                    # 判断该组是否全败 (all 0) 或全胜 (all 1) 执行绝对过滤
                     if np.all(group_slice == 0) or np.all(group_slice == 1):
                         total_episode_rewards[i : i + group_size] = 0.0
                         for j in range(i, i + group_size):
@@ -696,6 +718,7 @@ class TrajectoryCollector:
                                 step_data['step_reward'] = 0.0
                                 step_data['is_filtered'] = True 
                     
+                    # 2. 计算并存储 GRPO 优势 (基于过滤后的结果)
                     group_outcomes = total_episode_rewards[i : i + group_size]
                     mean = np.mean(group_outcomes)
                     std = np.std(group_outcomes)
@@ -705,10 +728,14 @@ class TrajectoryCollector:
                         adv = np.zeros_like(group_outcomes)
                     traj_advantages[i : i + group_size] = adv
 
+        # 3. 将计算好的轨迹优势注入到每个 Step 的数据字典中
         for i in range(len(total_batch_list)):
             for step_data in total_batch_list[i]:
                 step_data['traj_advantage'] = float(traj_advantages[i])
 
+        # =========================================================
+        # [NEW] GRPO Advantage Logger (Terminal Output)
+        # =========================================================
         try:
             if group_size > 1 and is_train:
                 env_modes = []
@@ -716,12 +743,15 @@ class TrajectoryCollector:
                     mode = "Unknown"
                     if len(total_batch_list[i]) > 0:
                         prompt_text = str(total_batch_list[i][0].get('final_prompt_text', ''))
-                        if "V-GraphAgent" in prompt_text:
-                            mode = "V-GraphAgent"
+                        if "CLEAR WEATHER" in prompt_text:
+                            mode = "System1"
+                        elif "FOG OF WAR" in prompt_text:
+                            mode = "System2"
                     env_modes.append(mode)
                 
                 rewards_tensor = torch.tensor(total_episode_rewards, dtype=torch.float32)
                 
+                # 【修改这里：传入 total_batch_list 和 total_success 以支持进一步统计】
                 self.compute_and_log_grpo_advantages(
                     rewards_tensor, 
                     env_modes, 
@@ -731,6 +761,7 @@ class TrajectoryCollector:
                 )
         except Exception as e:
             print(f"[Warning] Failed to compute and log GRPO advantages: {e}")
+        # =========================================================
 
         gen_batch_output: DataProto = self.gather_rollout_data(
             total_batch_list=total_batch_list,

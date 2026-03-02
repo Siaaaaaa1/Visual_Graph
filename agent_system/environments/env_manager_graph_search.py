@@ -3,185 +3,40 @@ import os
 import time
 import json
 from typing import Any, Dict, List, Tuple
-
 from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import FullSequenceSearchMemory
 
-# =================================================================
-# 1. System 1 (Fast Thinking) Prompts
-# =================================================================
+V_GRAPH_AGENT_INSTRUCTION = """
+# V-GraphAgent: RL-Driven Multimodal Graph Exploration
 
-SYSTEM1_TASK_INSTRUCTION = """
-# SYSTEM 1: FAST THINKING (CLEAR WEATHER MODE)
+你是一个多模态图智能体。你的目标是预测视觉图中中心节点（方形节点）的所属类别。
 
-You are a graph reasoning agent. The environment has analyzed the current Ego-graph and determined it has an **Extreme Margin of Victory** (the dominant category overwhelmingly outnumbers any other category). 
-Therefore, you have been routed to **System 1 Mode (Clear Weather)**.
+## 视觉与文本对照规则
+1. **视觉宏观导航**：你将看到一张以中心节点为原点的局部图。节点上的颜色代表语义特征相似度（暖色/深红色代表高度相似，冷色/浅灰色代表异质或偏移），形状代表拓扑重要性（★ 为宏观聚类中心，▼/▲ 为高出入度 Hub，● 为普通节点，■ 为中心节点）。图上直接标有真实的节点数字 ID。
+2. **零文本探索机制**：为了锻炼你的视觉与推理能力，初始状态**不提供**任何邻居节点的文本摘要。你只能通过观察图上的“形状”和“颜色”寻找高价值的证据节点。
 
-## 1. Initial State & Context
-* **Full Visibility:** There is NO Fog of War. You can visually see the predicted categories (colors) of all neighbor nodes.
-* **Context Provided:** You are provided with the text of the Center Node, PLUS the texts of representative nodes scaled by cluster size (up to 3 for the dominant category, 2 for secondary, and 1 for minor categories; 1-hop preferred) and key global hubs from your neighborhood.
-* **Candidate Categories:** A list of valid categories present in the current view is provided.
+## 探索与决策机制
+- **彻底打破纯文本依赖**：如果仅靠中心节点的初始先验无法确信，你**必须**结合视觉拓扑调用工具批量查阅完整摘要。
+- **注意非线性成本**：探索预算极度有限！单次动作最多允许查阅 5 个节点。累计查阅超出最大预算将强制判定失败；如果不查阅任何视图证据就盲猜且猜错，将受到 -2.0 的致命惩罚！
 
-## 2. Constraints & Rules
-* **NO EXPLORATION ALLOWED:** You are strictly forbidden from using exploration actions (`check_node`, `check_graph`, `paint`).
-* **The "Majority Trap":** Although the environment exhibits high homophily, **the topological majority is NOT ALWAYS the Ground Truth**. Sometimes a node applies a method to a new domain, connecting to many method nodes but belonging to the application domain.
-* **Action Required:** You MUST logically align the center node's text with the provided representative texts. If the center text aligns with a minority representative, you must override the visual majority. If it aligns with the majority, follow it.
-* **Strict Vocabulary:** You MUST choose your final answer exactly from the provided **Candidate Categories** list. Do not invent new category names.
+## 动作空间
+- 批量查阅节点摘要：`<action>check_nodes([ID1, ID2, ...])</action>` （例如：<action>check_nodes([1024, 2048])</action>）
+- 提交最终答案：`<action>final(Category)</action>` （Category必须严格来自可选类别列表）
 
-## 3. Interaction Actions
-At each step, you must choose **exactly one** action:
-* **Submit Answer:** `<action>final:Category Name</action>`
-
-## 4. Response Format
-1. **<think>...** Analyze the center text against the representative texts. Decide whether to follow or override the topological majority.
-2. **<action>...** Output your final action using a category from the Candidate Categories.
+## 强制思考格式 (Metacognitive CoT)
+在采取动作前，必须按以下模板进行显式的自我审视：
+<think>
+[当前假设]：结合中心节点先验与局部视觉拓扑（如深红色节点的分布），最可能的类别是什么？
+[置信度评估]：把握大吗？（高/中/低）
+[批量动作决策]：如果不确定，根据视图上的颜色和重要形状，我该查阅哪几个真实 ID 的节点及其原因？如果确定，直接提交答案。
+</think>
+<action>...</action>
 """
-
-SYSTEM1_FEW_SHOT = """
----
-## 5. Demonstration Examples (System 1)
-
-### Example 5.1: Overriding the Majority (The "Majority Trap")
-**Context:** Center Node 38491. Text states: "We propose a novel Transformer architecture for medical image tumor segmentation...". 
-Visual graph legend shows 80% Blue (Natural Language Processing) and 20% Red (Computer Vision).
-Candidate Categories: Natural Language Processing, Computer Vision.
-Supplementary Neighbors Context:
-- [Representative for Natural Language Processing (1-hop) | Node 12]: "Attention is all you need for language translation tasks..."
-- [Representative for Computer Vision (1-hop) | Node 55]: "Image classification using convolutional neural networks..."
-
-**Step 1:**
-<think>
-I am in System 1 (Clear Weather). I must evaluate the texts without exploring.
-1. Topology Analysis: The dominant majority is Natural Language Processing (80%).
-2. Textual Verification (CRITICAL): The center node proposes a "Transformer architecture" (often NLP) but explicitly applies it to "medical image tumor segmentation".
-3. Representative Matching: The NLP representative discusses "language translation", which does not match. The Computer Vision representative discusses "Image classification", which perfectly aligns with the center node's visual task.
-Conclusion: The high NLP neighbor count is a citation artifact. The semantic Ground Truth of the center node is Computer Vision. Both categories are in the Candidate Categories list. I must NOT blindly follow the 80% majority.
-</think>
-<action>final:Computer Vision</action>
-
-### Example 5.2: Aligning with the Majority (Homophily Holds)
-**Context:** Center Node 1024. Text states: "This paper introduces a new message passing scheme for Graph Neural Networks to improve node classification...". 
-Visual graph legend shows 90% Green (Graph Learning) and 10% Yellow (Optimization).
-Candidate Categories: Graph Learning, Optimization.
-Supplementary Neighbors Context:
-- [Representative for Graph Learning (1-hop) | Node 8]: "A comprehensive survey on Graph Neural Networks and their applications..."
-- [Representative for Optimization (1-hop) | Node 23]: "Stochastic gradient descent with momentum..."
-
-**Step 1:**
-<think>
-I am in System 1 (Clear Weather). I must evaluate the texts.
-1. Topology Analysis: The dominant majority is Graph Learning (90%).
-2. Textual Verification: The center node introduces a "message passing scheme for Graph Neural Networks".
-3. Representative Matching: The Graph Learning representative explicitly discusses "Graph Neural Networks", matching the center node perfectly. The Optimization representative is secondary.
-Conclusion: The topological majority perfectly aligns with the center node's semantic content. I will confidently follow the majority.
-</think>
-<action>final:Graph Learning</action>
-"""
-
-# =================================================================
-# 2. System 2 (Slow Thinking) Prompts
-# =================================================================
-
-SYSTEM2_TASK_INSTRUCTION = """
-# SYSTEM 2: SLOW THINKING (FOG OF WAR: ANONYMOUS COLORS)
-
-You are a graph reasoning agent. The environment has determined this graph lacks a clear margin of victory (it is deceptive, heterogeneous, or sits on a boundary). 
-Therefore, you have been routed to **System 2 Mode (Fog of War)**.
-
-## 1. Fog of War Mechanics (Anonymous Color Mapping)
-* **Text Masked:** The center node's text is hidden.
-* **Colors Visible, Semantics Masked:** You CAN see the colors of neighbor nodes. Nodes sharing the same color belong to the same category. However, the actual semantic names are anonymized (e.g., "Group 1", "Group 2").
-* **Candidate Categories:** You are provided with a list of ALL valid categories present in your current view. Your job is to map the anonymous groups to these candidate categories.
-
-## 2. Visual Topology & Shape Semantics
-Rely on topological shapes to prioritize exploration:
-* **1-Hop Nodes (Circles ◯):** Immediate neighbors. Represent direct local context.
-* **High Out-Degree Nodes (Downward Triangles ▼):** Hub nodes. Foundational methods. 
-* **High In-Degree Nodes (Upward Triangles ▲):** Hub nodes. Popular applications.
-
-## 3. The Evidence-Gated Logic Lock & Category Identification
-* **Major Clusters Rule:** You MUST successfully `paint` the correct category for **EACH** of the Major Clusters (Anonymous Groups) listed in your observation gate requirement.
-* **Strict Vocabulary:** You MUST choose the category name for your `paint` and `final` actions strictly from the provided **Candidate Categories** list.
-* **NO IMMEDIATE FEEDBACK:** When you use the `paint` action, the environment will NOT immediately confirm if your semantic mapping is perfectly correct. It will only say "[DELAYED FEEDBACK] Group 'X' painted...". 
-
-## 4. Interaction Actions (CRITICAL: MAX 10 Steps)
-You ONLY have 10 steps to complete this task. Efficiency is paramount. Use batching!
-At each step, choose **exactly one** action:
-* **Batch Inspect Text:** `<action>check_nodes:[ID1, ID2, ID3]</action>` (Reveal text of up to 5 nodes at once. USE THIS to save steps!)
-* **Single Inspect Text:** `<action>check_node:ID</action>`
-* **Paint Category:** `<action>paint:Group Name,Category Name</action>`. Submit your category identification for an anonymous group. Example: `<action>paint:Group 1,Machine Learning</action>`.
-* **Submit Answer:** `<action>final:Category Name</action>` (Use immediately after the logic gate is unlocked).
-
-## 5. Response Format
-1. **<think>...** Detailed Chain of Thought. Analyze shapes, autonomously sample nodes to build evidence, verify hypotheses, and map clusters to the Candidate Categories.
-2. **<action>...** One valid command.
-"""
-
-SYSTEM2_FEW_SHOT = """
----
-## 6. Demonstration Example (Autonomous Sampling & Category Identification)
-
-**Context:** Center Node 8712. Text is hidden. 
-Observation states: "GATE REQUIREMENT: You must correctly paint the category for at least ONE node from EACH of these Major Clusters: [Group 1, Group 2]."
-Candidate Categories: Machine Learning, Biomolecular Engineering, Data Mining
-Image shows 8 Blue nodes (Group 1), 6 Red nodes (Group 2).
-
-**Step 1: (Autonomous Batch Sampling)**
-<think>
-I need to unlock the gate by identifying and painting the categories for Group 1 (Blue) and Group 2 (Red). 
-I must gather enough evidence to prove my hypothesis about what these groups represent, which will also help me understand the center node's context.
-I will autonomously sample a mix of high-degree Hubs and 1-hop nodes: Blue Nodes (15, 22) for Group 1, and Red Nodes (8, 30) for Group 2.
-</think>
-<action>check_nodes:[15, 22, 8, 30]</action>
-
-**Observation:** Node 15: "Graph Neural Networks survey..." | Node 22: "Optimizing GNN layers..." | Node 8: "Bioinformatics application of neural networks..." | Node 30: "Molecular property prediction..."
-
-**Step 2: (Hypothesis Proven & Paint Category for Group 1)**
-<think>
-Both Blue nodes (15, 22) consistently discuss algorithms and GNNs. Looking at the Candidate Categories, "Machine Learning" is the perfect semantic match for 'Group 1'.
-I will fulfill the Group 1 requirement by painting the category 'Machine Learning' for Group 1.
-</think>
-<action>paint:Group 1,Machine Learning</action>
-
-**Observation:** [DELAYED FEEDBACK] Group 1 painted as 'Machine Learning'. Correctness hidden. Legend updated.
-
-**Step 3: (Paint Category for Group 2)**
-<think>
-Group 1 requirement met. Now I must paint the category for Group 2. My evidence confirmed it is Biomolecular Engineering.
-</think>
-<action>paint:Group 2,Biomolecular Engineering</action>
-
-**Observation:** [DELAYED FEEDBACK] Group 2 painted as 'Biomolecular Engineering'. Correctness hidden. Gate UNLOCKED.
-
-**Step 4: (Check Center & Finalize)**
-<think>
-The environment says Gate UNLOCKED. The center node connects to ML methods (Group 1) and Bio applications (Group 2). Let me quickly check the center node's text to finalize the prediction.
-</think>
-<action>check_node:8712</action>
-
-**Observation:** Node 8712: "We utilize GNNs for fast drug discovery..."
-
-**Step 5: (Submit - Task completed in 5 steps)**
-<think>
-The center text confirms it uses the computational method for an application (drug discovery). Between the candidate categories, this clearly belongs to Biomolecular Engineering.
-</think>
-<action>final:Biomolecular Engineering</action>
-"""
-
-# =================================================================
-# 3. Environment Manager
-# =================================================================
 
 class GraphSearchEnvironmentManager(EnvironmentManagerBase):
-    """
-    Graph Search 场景的全局管理器（Manager）。
-    协调底层物理环境群(BatchGraphSearchEnv)、智能体内存系统和提示词构建器（Prompt Routing）。
-    """
-
     def __init__(self, envs, projection_f, config):
         self.memory = FullSequenceSearchMemory()
         super().__init__(envs, projection_f, config)
-        
         self._think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
         self._action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
         
@@ -208,10 +63,9 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
         self.conversations = []
         for i in range(len(text_obs)):
             mode = self.initial_modes[i]
-            if mode == "System1":
-                sys_inst = SYSTEM1_TASK_INSTRUCTION + "\n" + SYSTEM1_FEW_SHOT
-            else:
-                sys_inst = SYSTEM2_TASK_INSTRUCTION + "\n" + SYSTEM2_FEW_SHOT
+            
+            # 统一使用最新版的 V_GRAPH_AGENT_INSTRUCTION
+            sys_inst = V_GRAPH_AGENT_INSTRUCTION
 
             # 将 Prompt 完美融合进 ChatML 原生格式
             conv = [
