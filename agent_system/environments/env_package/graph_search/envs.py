@@ -22,7 +22,6 @@ class GraphSearchEnv:
         self.done = False
         self.current_image = None
         self.valid_nodes_in_view = set()
-        
         self.is_won = False
         self.failure_reason = "Timeout"
         
