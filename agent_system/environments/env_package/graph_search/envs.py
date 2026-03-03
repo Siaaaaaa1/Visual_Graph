@@ -13,12 +13,12 @@ class GraphSearchEnv:
         self.max_steps = max_steps
         self.node_text_db = node_text_db
         self.visualizer = GraphVisualizer(dataset_name=dataset_name, dataset_dir=dataset_dir, shared_data=shared_graph_data)
-        # [移除] max_budget 变量，不设置全局强行截断
         self._reset_internal()
 
     def _reset_internal(self):
         self.step_count = 0
-        self.check_node_count = 0 # 全局累计查阅次数统计
+        self.check_node_count = 0 # 全局累计查阅次数统计（防盲猜）
+        self.check_batch_count = 0 # 全局累计查阅批次统计（计费标准）
         self.done = False
         self.current_image = None
         self.valid_nodes_in_view = set()
@@ -37,8 +37,8 @@ class GraphSearchEnv:
         self.center_id = kwargs["center_id"]
         self.answer = kwargs["answer"]
 
-        # 生成零文本同心圆雷达图
-        img_bytes, node_catalog_info, all_classes = self.visualizer.draw_vgraph_radar_layout(int(self.center_id))
+        # 生成零文本同心圆雷达图，并接收锚点映射
+        img_bytes, node_catalog_info, all_classes, anchor_mapping = self.visualizer.draw_vgraph_radar_layout(int(self.center_id))
         self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024), Image.Resampling.LANCZOS))
         
         for real_id in node_catalog_info.keys():
@@ -48,19 +48,27 @@ class GraphSearchEnv:
         center_title, _ = self._get_title_and_abstract(center_raw_text)
         
         proxy_data = self.visualizer._get_node_info(self.center_id).get("proxy_info", {})
-        center_proxy = proxy_data.get("top1", "Unknown")
+        center_proxy = proxy_data.get("ranked_labels", ["Unknown"])
 
         candidates_str = ", ".join(all_classes)
+        
+        # 组装锚点情报文本
+        anchor_str_lines = []
+        for nid, cls_name in anchor_mapping.items():
+            anchor_str_lines.append(f"   - 节点 {nid} : 代表【{cls_name}】领域")
+        anchor_bullet_points = "\n".join(anchor_str_lines) if anchor_str_lines else "   - (无)"
         
         obs = (
             f"🎯 任务：请预测目标中心节点 **{self.center_id}** 的准确类别。\n\n"
             f"【中心节点基础先验】\n"
             f"* Title: {center_title}\n"
-            f"* Initial Proxy Prediction (60% confidence): {center_proxy}\n\n"
-            f"【操作指南】\n"
-            f"图上展示了其局部结构的同心圆雷达图（内圈1-hop，外圈Hubs），颜色代表真实文本特征相似度，形状代表拓扑度数。\n"
+            f"* Proxy Predicted Labels (Prior Hypothesis): {center_proxy}\n\n"
+            f"【操作指南与视图说明】\n"
+            f"图上展示了其局部结构的同心圆雷达图。\n"
+            f"★ **特别情报 (宏观锚点导航)** ★：图边缘的星形节点 (★) 是我们为你精选的各路学科代表（包含先验类别、易混淆类别、以及视觉上极具欺骗性的特征相似类别）。它们的身份如下：\n"
+            f"{anchor_bullet_points}\n\n"
             f"你可以自由结合视觉发现，调用查阅动作：`<action>check_nodes([ID1, ID2, ...])</action>`。\n"
-            f"注意：单次动作最多允许带 5 个 ID。总查阅次数没有硬性限制，但前两免费，从查阅第 3 个节点起每个节点都会产生递增的微小惩罚。如果不查阅盲猜失败将扣 -2.0 分。\n\n"
+            f"注意：单次动作最多允许带 5 个 ID。总查阅次数没有硬性限制，但前两批免费，从查阅第 3 批起产生微小惩罚。如果不查阅盲猜失败将扣 -2.0 分。\n\n"
             f"可选类别: [{candidates_str}]\n"
         )
 
@@ -95,21 +103,28 @@ class GraphSearchEnv:
             ids_str = check_match.group(1)
             target_ids = [int(x.strip()) for x in ids_str.split(',') if x.strip().isdigit()]
             
-            # [恢复限制]：单次请求 ID 个数不得超过 5 个，防止上下文一次性撑爆
+            # 单次请求 ID 个数不得超过 5 个
             if len(target_ids) > 5:
                 target_ids = target_ids[:5] 
+
+            # 按批次累加惩罚
+            self.check_batch_count += 1
+            if self.check_batch_count > 2:
+                reward += -0.05 
 
             obs_lines = []
             for tid in target_ids:
                 if tid in self.valid_nodes_in_view:
                     raw_text = self.node_text_db.get(str(tid), "Title: Unknown\nAbstract: not found.")
                     title, abstract = self._get_title_and_abstract(raw_text)
-                    obs_lines.append(f"--- Node {tid} ---\nTitle: {title}\nAbstract: {abstract}")
                     
-                    # 动态探索阶梯成本：全局查阅超过 2 个后，开始持续累加软性惩罚 (-0.05)
+                    deg_info = self.visualizer.get_node_degree_info(tid)
+                    in_deg = deg_info['in_degree']
+                    out_deg = deg_info['out_degree']
+                    
+                    obs_lines.append(f"--- Node {tid} ---\nIn-degree: {in_deg} | Out-degree: {out_deg}\nTitle: {title}\nAbstract: {abstract}")
+                    
                     self.check_node_count += 1
-                    if self.check_node_count > 2:
-                        reward += -0.05 
                 else:
                     obs_lines.append(f"错误：节点 {tid} 不在当前雷达视野内。")
                     reward += -0.1
@@ -142,7 +157,6 @@ class GraphSearchEnv:
             else:
                 failure_reason = "Timeout"
         elif not self.done and self.step_count >= self.max_steps:
-            # 环境通过回合最大步数自然结束，而非预算截断
             self.done = True; reward = -1.0; failure_reason = "Timeout"
 
         if self.done:

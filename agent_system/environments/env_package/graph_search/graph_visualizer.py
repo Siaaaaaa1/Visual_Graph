@@ -13,6 +13,7 @@ import matplotlib.patheffects as pe
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as mpatches
+from collections import defaultdict
 
 class GraphVisualizer:
     @staticmethod
@@ -55,7 +56,7 @@ class GraphVisualizer:
         return graph_data, reverse_adj, class_map
 
     def __init__(self, dataset_name: str, dataset_dir: str = "./datasets", shared_data: Optional[Tuple[Dict, Dict, Dict, Any]] = None):
-        self.BASE_FIG_SIZE = 12 # 稍微放大以容纳图例
+        self.BASE_FIG_SIZE = 12 
         
         if shared_data is not None:
             self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
@@ -67,9 +68,63 @@ class GraphVisualizer:
         self.all_node_ids = list(self.graph_data.keys())
         self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
 
-        # 预计算全局 Hubs 以备“外圈虫洞”使用
         self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
-        self.sorted_global_hubs = sorted(self.all_node_ids, key=lambda x: self.global_degrees[x]['in_degree'] + self.global_degrees[x]['out_degree'], reverse=True)
+        
+        # [新增] 1. 优先校准全局特征相似度的真实分布范围
+        self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
+        
+        self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+
+    def _calibrate_global_sim(self, sample_size=10000) -> Tuple[float, float]:
+        """随机抽样全局节点对，寻找特征相似度的真实有效分布区间，用于色谱拉伸"""
+        print("[GraphVisualizer] 正在校准全局特征相似度分布以优化色谱渲染...")
+        num_nodes = len(self.feat_matrix)
+        if num_nodes < 2: 
+            return 0.0, 1.0
+        
+        idx1 = np.random.randint(0, num_nodes, sample_size)
+        idx2 = np.random.randint(0, num_nodes, sample_size)
+        sims = np.sum(self.feat_matrix[idx1] * self.feat_matrix[idx2], axis=1)
+        
+        # 截取 2% 和 98% 分位数，去除极端离群值，让主体分布撑满红蓝两极
+        global_min = float(np.percentile(sims, 2))
+        global_max = float(np.percentile(sims, 98))
+        
+        if global_max - global_min < 1e-5:
+            global_min -= 0.1
+            global_max += 0.1
+            
+        print(f"[GraphVisualizer] 色谱拉伸校准完毕: 纯蓝(2%)={global_min:.4f}, 纯红(98%)={global_max:.4f}")
+        return global_min, global_max
+
+    def _build_robust_anchors_and_confusion(self):
+        print("[GraphVisualizer] 正在离线构建鲁棒类锚点与全局混淆矩阵...")
+        class_candidates = defaultdict(list)
+        confusion_matrix = defaultdict(int)
+        
+        for nid_str, info in self.graph_data.items():
+            nid = int(nid_str)
+            deg = self.global_degrees[nid_str]['in_degree'] + self.global_degrees[nid_str]['out_degree']
+            ranked = info.get("proxy_info", {}).get("ranked_labels", [])
+            
+            for i in range(len(ranked)):
+                for j in range(i + 1, len(ranked)):
+                    c1, c2 = ranked[i], ranked[j]
+                    confusion_matrix[(c1, c2)] += 1
+                    confusion_matrix[(c2, c1)] += 1
+            
+            for rank_idx, cls_name in enumerate(ranked):
+                weight = 1.0 / (rank_idx + 1)
+                score = deg * weight
+                class_candidates[cls_name].append((nid, score))
+                
+        anchors = {}
+        for cls_name, candidates in class_candidates.items():
+            if candidates:
+                best_node = max(candidates, key=lambda x: x[1])[0]
+                anchors[cls_name] = best_node
+                
+        return anchors, confusion_matrix
 
     def _build_feat_matrix(self):
         all_ids = list(self.graph_data.keys())
@@ -105,8 +160,7 @@ class GraphVisualizer:
         in_nbs = self.reverse_adj.get(str(node_id), [])
         return list(set(out_nbs) | set(in_nbs))
 
-    def draw_vgraph_radar_layout(self, center_id: int, max_1hop: int = 15, max_2hop: int = 10, max_global: int = 5) -> Tuple[bytes, Dict[str, Dict], List[str]]:
-        """V-GraphAgent 2.0: 纯正同心圆 + 余弦相似度热力图映射"""
+    def draw_vgraph_radar_layout(self, center_id: int, max_1hop: int = 15, max_2hop: int = 10, max_global: int = 5) -> Tuple[bytes, Dict[str, Dict], List[str], Dict[int, str]]:
         
         # 1. 挑选节点构建视图
         nbs_1hop = self._get_neighbors(center_id, undirected=True)
@@ -121,22 +175,64 @@ class GraphVisualizer:
         nbs_2hop.discard(center_id)
         
         node_degrees_2hop = {n: self.get_node_degree_info(n) for n in nbs_2hop}
-        # 过滤出 2-hop 中的绝对 Hub
         outer_circle_2hop = sorted([n for n in nbs_2hop if node_degrees_2hop[n]['out_degree'] > 3 or node_degrees_2hop[n]['in_degree'] > 3], 
                                    key=lambda x: node_degrees_2hop[x]['out_degree'] + node_degrees_2hop[x]['in_degree'], reverse=True)[:max_2hop]
         
-        # 补充全局异质虫洞 (★)
+        # 补充全局异质虫洞 (★) - 三路困难负样本召回策略
         global_hubs_to_add = []
-        for n_str in self.sorted_global_hubs:
-            nid = int(n_str)
-            if nid != center_id and nid not in inner_circle_nodes and nid not in outer_circle_2hop:
-                global_hubs_to_add.append(nid)
+        added_classes = set()
+        anchor_mapping = {}
+        
+        center_info = self._get_node_info(center_id)
+        ranked_labels = center_info.get("proxy_info", {}).get("ranked_labels", [])
+        
+        def _add_anchor(cls_name):
+            if cls_name in self.proxy_class_anchors and cls_name not in added_classes:
+                anchor_id = self.proxy_class_anchors[cls_name]
+                if anchor_id != center_id and anchor_id not in inner_circle_nodes and anchor_id not in outer_circle_2hop:
+                    if anchor_id not in global_hubs_to_add:
+                        global_hubs_to_add.append(anchor_id)
+                        added_classes.add(cls_name)
+                        anchor_mapping[anchor_id] = cls_name
+
+        # 【第一路】本地假设锚点
+        for label in ranked_labels:
             if len(global_hubs_to_add) >= max_global: break
+            _add_anchor(label)
+            
+        # 【第二路】全局混淆锚点
+        if len(global_hubs_to_add) < max_global and len(ranked_labels) > 0:
+            top1_cls = ranked_labels[0]
+            confused_pairs = []
+            if hasattr(self, 'global_confusion_matrix'):
+                for (c1, c2), count in self.global_confusion_matrix.items():
+                    if c1 == top1_cls and c2 not in added_classes:
+                        confused_pairs.append((c2, count))
+                confused_pairs.sort(key=lambda x: x[1], reverse=True)
+                for cls_name, _ in confused_pairs:
+                    if len(global_hubs_to_add) >= max_global - 1: break
+                    _add_anchor(cls_name)
+
+        # 【第三路】纯视觉欺骗锚点
+        if len(global_hubs_to_add) < max_global and hasattr(self, 'proxy_class_anchors'):
+            center_idx = self.id_to_idx.get(str(center_id))
+            center_feat = self.feat_matrix[center_idx]
+            feature_negatives = []
+            for cls_name, anchor_id in self.proxy_class_anchors.items():
+                if cls_name in added_classes: continue
+                a_idx = self.id_to_idx.get(str(anchor_id))
+                if a_idx is not None:
+                    sim = float(self.feat_matrix[a_idx].dot(center_feat))
+                    feature_negatives.append((cls_name, sim))
+            feature_negatives.sort(key=lambda x: x[1], reverse=True)
+            for cls_name, _ in feature_negatives:
+                if len(global_hubs_to_add) >= max_global: break
+                _add_anchor(cls_name)
                 
         outer_circle_nodes = outer_circle_2hop + global_hubs_to_add
         nodes_to_draw = [center_id] + inner_circle_nodes + outer_circle_nodes
         
-        # 2. 计算特征余弦相似度并映射到 CoolWarm 颜色空间
+        # [核心修复] 2. 基于“全局分布校准”计算颜色映射，根治表示退化与局部失真
         center_idx = self.id_to_idx.get(str(center_id))
         center_feat = self.feat_matrix[center_idx]
         
@@ -147,13 +243,16 @@ class GraphVisualizer:
         for nid in nodes_to_draw:
             if nid == center_id:
                 sim = 1.0
+                norm_sim = 1.0 # 中心节点绝对红
             else:
                 idx = self.id_to_idx.get(str(nid))
                 sim = float(self.feat_matrix[idx].dot(center_feat)) if idx is not None else 0.0
+                
+                # 使用我们在 __init__ 中探明的全局真实上下界拉伸
+                norm_sim = (sim - self.global_sim_min) / (self.global_sim_max - self.global_sim_min)
+                norm_sim = max(0.0, min(1.0, norm_sim)) # 超出 98% 都是纯红，低于 2% 都是纯蓝
             
             node_sims[nid] = sim
-            # 将 [-1, 1] 映射到 [0, 1] 获取颜色
-            norm_sim = max(0.0, min(1.0, (sim + 1.0) / 2.0))
             rgba = cmap(norm_sim)
             node_colors[nid] = rgba
 
@@ -169,14 +268,12 @@ class GraphVisualizer:
                     
         pos = {center_id: np.array([0.0, 0.0])}
         
-        # 完美内圈
         r_inner = 4.0
         if inner_circle_nodes:
             angle_step = 2 * np.pi / len(inner_circle_nodes)
             for i, n in enumerate(inner_circle_nodes):
                 pos[n] = np.array([r_inner * np.cos(i * angle_step), r_inner * np.sin(i * angle_step)])
                 
-        # 完美外圈
         r_outer = 7.5
         if outer_circle_nodes:
             angle_step = 2 * np.pi / len(outer_circle_nodes)
@@ -188,14 +285,12 @@ class GraphVisualizer:
         canvas = FigureCanvas(fig)
         ax = fig.add_subplot(111)
         
-        # 绘制不同类型的虚实连线
         edges_1hop = [(u, v) for u, v in G.edges() if u == center_id or v == center_id]
         edges_other = [(u, v) for u, v in G.edges() if u != center_id and v != center_id]
         
         nx.draw_networkx_edges(G, pos, edgelist=edges_1hop, alpha=0.6, edge_color="gray", width=2.5, ax=ax)
         nx.draw_networkx_edges(G, pos, edgelist=edges_other, alpha=0.3, edge_color="lightgray", style="dashed", width=1.5, ax=ax)
 
-        # 区分形状绘制
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         for nid in nodes_to_draw:
             if nid == center_id:
@@ -218,19 +313,16 @@ class GraphVisualizer:
             size = 3500 if shape_marker == "s" else (2200 if shape_marker in ["*", "^", "v"] else 1800)
             nx.draw_networkx_nodes(G, pos, nodelist=nlist, node_color=colors, edgecolors="black", linewidths=2.0, node_size=size, node_shape=shape_marker, ax=ax)
             
-            # 记录 Catalog，供纯文本核对（不含摘要）
             role_map = {"s": "Center", "*": "Macro Hub", "^": "In-Hub", "v": "Out-Hub", "o": "Normal"}
             for n in nlist:
                 node_catalog_info[str(n)] = {"role": role_map[shape_marker], "similarity": f"{node_sims[n]:.2f}"}
 
-        # 绘制描边 ID
         labels_dict = {n: str(n) for n in nodes_to_draw}
         outline_effect = [pe.withStroke(linewidth=3, foreground='white')]
         texts = nx.draw_networkx_labels(G, pos, labels=labels_dict, font_size=11, font_weight="bold", font_color="black", ax=ax)
         for t in texts.values():
             t.set_path_effects(outline_effect)
 
-        # 5. 绘制视觉说明图例 (Legend) - 帮助大模型理解颜色和形状
         legend_elements = [
             mpatches.Patch(facecolor=cmap(0.9), edgecolor='k', label='High Semantic Sim (Red)'),
             mpatches.Patch(facecolor=cmap(0.5), edgecolor='k', label='Neutral Sim (White)'),
@@ -252,4 +344,4 @@ class GraphVisualizer:
         img_bytes = buf.getvalue()
         buf.seek(0)
         
-        return img_bytes, node_catalog_info, self.get_all_candidate_classes()
+        return img_bytes, node_catalog_info, self.get_all_candidate_classes(), anchor_mapping

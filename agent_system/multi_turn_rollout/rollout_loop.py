@@ -294,11 +294,6 @@ class TrajectoryCollector:
 
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs, step=_step)
 
-            input_prompts = batch.non_tensor_batch.get('final_prompt_text', [""] * batch_size)
-            truncation_flags = batch.non_tensor_batch.get('is_truncated', [False] * batch_size)
-            truncated_texts = batch.non_tensor_batch.get('truncated_text', [""] * batch_size)
-            image_inputs = batch.non_tensor_batch.get('multi_modal_inputs', None)
-
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids", "final_prompt_text", "is_truncated", "truncated_text"]
             if "multi_modal_data" in batch.non_tensor_batch:
@@ -332,70 +327,7 @@ class TrajectoryCollector:
             next_obs, rewards, dones, infos = envs.step(text_actions)
             env_duration = time.time() - env_start_time
 
-            print(f"\n{'='*40} STEP {_step} DETAILS {'='*40}")
-            input_len_batch = batch_input.batch['input_ids'].shape[1]
-            output_len_batch = batch_output.batch['responses'].shape[1]
-            print(f"Stats: ModelTime={model_duration:.2f}s, EnvTime={env_duration:.2f}s, InputLen={input_len_batch}, OutputLen={output_len_batch}")
-
-            for i in range(batch_size):
-                if i >= 1: break 
-                
-                if not active_masks[i]:
-                    print(f"\n--- [Sample {i}] --- (Skipped: Episode already finished)")
-                    continue
-
-                print(f"\n--- [Sample {i}] ---")
-                
-                valid_input_len = batch_input.batch['attention_mask'][i].sum().item()
-                img_info = "No Image"
-                
-                if image_inputs is not None:
-                    sample_inputs = image_inputs[i]
-                    if isinstance(sample_inputs, dict):
-                        if 'image_grid_thw' in sample_inputs:
-                             grid = sample_inputs['image_grid_thw']
-                             img_shape = grid.tolist() if hasattr(grid, 'tolist') else str(grid)
-                             img_info = f"Grid Shape: {img_shape}"
-                        elif 'pixel_values' in sample_inputs:
-                             pv = sample_inputs['pixel_values']
-                             if isinstance(pv, list):
-                                 img_info = f"Pixel Values: {len(pv)} images"
-                             else:
-                                 img_info = f"Pixel Values Shape: {pv.shape}"
-                
-                print(f"[Input Stats] Text Len: {valid_input_len} | Image Info: {img_info}")
-                
-                print(f"\n[Input Prompt (Full)]:\n{input_prompts[i]}")
-                
-                if truncation_flags[i]:
-                    print(f"\n[!!! WARNING: PROMPT TRUNCATED !!!]")
-                    print(f"[Truncated Content]: {truncated_texts[i]}")
-                
-                response_text = text_actions[i]
-                print(f"\n[Full Model Response]:\n{response_text}")
-
-                think = "N/A"
-                action = "N/A"
-
-                if infos and i < len(infos):
-                    info = infos[i]
-                    think = info.get('parsed_think', None)
-                    action = info.get('parsed_action_content', None)
-                
-                if not think: 
-                    m = think_pattern.search(response_text)
-                    think = m.group(1).strip() if m else "Not Found"
-                if not action or action == "No Action Found":
-                    m = action_pattern.search(response_text)
-                    action = m.group(1).strip() if m else "Not Found"
-
-                print(f"\n[Parsed Structure]")
-                print(f"  > Think: {think}")
-                print(f"  > Action: {action}")
-
-                raw_env_feedback = next_obs['anchor'][i]
-                print(f"\n[Raw Env Feedback (Result of executed action)]:\n{raw_env_feedback}")
-                print("-" * 60)
+            # 移除了此处原本的每个 step 的大量 print 代码
 
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
@@ -448,6 +380,51 @@ class TrajectoryCollector:
 
             if is_done.all():
                 break
+
+        # =====================================================================
+        # 新增：所有轨迹结束后的统一打印逻辑（仅打印最后一个有效 step 的完整信息）
+        # =====================================================================
+        print(f"\n{'='*40} TRAJECTORY ROLLOUT COMPLETE {'='*40}")
+        for i in range(batch_size):
+            if i >= 1: break  # 保留你原有的逻辑：只抽样打印第一个样本的信息，防止日志刷屏
+            
+            if not total_batch_list[i]:
+                continue
+            
+            # 提取最后一步的信息
+            final_step_data = total_batch_list[i][-1]
+            last_info = total_infos[i][-1] if total_infos[i] else {}
+            
+            print(f"\n--- [Sample {i} Final State] ---")
+            
+            input_prompt = final_step_data.get('final_prompt_text', 'N/A')
+            print(f"\n[Final Input Prompt (Full)]:\n{input_prompt}")
+            
+            if final_step_data.get('is_truncated', False):
+                print(f"\n[!!! WARNING: PROMPT TRUNCATED !!!]")
+                print(f"[Truncated Content]: {final_step_data.get('truncated_text', '')}")
+            
+            response_text = final_step_data.get('model_response_text', 'N/A')
+            print(f"\n[Final Model Response]:\n{response_text}")
+
+            think = last_info.get('parsed_think', None)
+            action = last_info.get('parsed_action_content', None)
+            
+            if not think: 
+                m = think_pattern.search(str(response_text))
+                think = m.group(1).strip() if m else "Not Found"
+            if not action or action == "No Action Found":
+                m = action_pattern.search(str(response_text))
+                action = m.group(1).strip() if m else "Not Found"
+
+            print(f"\n[Parsed Structure]")
+            print(f"  > Think: {think}")
+            print(f"  > Action: {action}")
+
+            raw_env_feedback = final_step_data.get('anchor_obs', 'N/A')
+            print(f"\n[Raw Env Feedback (Result of final action)]:\n{raw_env_feedback}")
+            print("-" * 60)
+        # =====================================================================
         
         success: Dict[str, np.ndarray] = envs.success_evaluator(
                     total_infos=total_infos,
