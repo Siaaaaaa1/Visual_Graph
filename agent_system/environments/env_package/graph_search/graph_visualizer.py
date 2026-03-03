@@ -94,7 +94,7 @@ class GraphVisualizer:
             global_min -= 0.1
             global_max += 0.1
             
-        print(f"[GraphVisualizer] 色谱拉伸校准完毕: 纯蓝(2%)={global_min:.4f}, 纯红(98%)={global_max:.4f}")
+        print(f"[GraphVisualizer] 色谱拉伸校准完毕: 纯蓝(4%)={global_min:.4f}, 纯红(96%)={global_max:.4f}")
         return global_min, global_max
 
     def _build_robust_anchors_and_confusion(self):
@@ -310,20 +310,46 @@ class GraphVisualizer:
             ax=ax
         )
 
+        
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
-        for nid in nodes_to_draw:
-            if nid == center_id:
-                shapes_dict["s"].append(nid)
-            elif nid in global_hubs_to_add:
-                shapes_dict["*"].append(nid)
+        
+        # 1. 预先处理中心节点和全局节点
+        shapes_dict["s"].append(center_id)
+        shapes_dict["*"].extend([n for n in global_hubs_to_add if n in nodes_to_draw])
+        
+        # 2. 收集局部普通节点（剔除中心和异质全局节点）
+        local_nodes = [n for n in nodes_to_draw if n != center_id and n not in global_hubs_to_add]
+        
+        potential_in_hubs = []
+        potential_out_hubs = []
+        
+        # 3. 计算度数并分类
+        for nid in local_nodes:
+            deg = self.get_node_degree_info(nid)
+            in_d = deg["in_degree"]
+            out_d = deg["out_degree"]
+            
+            # 条件：对应度数必须 > 5，根据入度出度谁大来分类
+            if in_d > 5 and in_d >= out_d:
+                potential_in_hubs.append((nid, in_d))
+            elif out_d > 5 and out_d > in_d:
+                potential_out_hubs.append((nid, out_d))
+                
+        # 4. 按度数从大到小排序，各自最多取前 2 个
+        potential_in_hubs.sort(key=lambda x: x[1], reverse=True)
+        potential_out_hubs.sort(key=lambda x: x[1], reverse=True)
+        
+        top_in_hubs = set(x[0] for x in potential_in_hubs[:2])
+        top_out_hubs = set(x[0] for x in potential_out_hubs[:2])
+        
+        # 5. 分配最终形状
+        for nid in local_nodes:
+            if nid in top_in_hubs:
+                shapes_dict["^"].append(nid)
+            elif nid in top_out_hubs:
+                shapes_dict["v"].append(nid)
             else:
-                deg = self.get_node_degree_info(nid)
-                if deg["in_degree"] > 10 and deg["in_degree"] >= deg["out_degree"]:
-                    shapes_dict["^"].append(nid)
-                elif deg["out_degree"] > 10 and deg["out_degree"] > deg["in_degree"]:
-                    shapes_dict["v"].append(nid)
-                else:
-                    shapes_dict["o"].append(nid)
+                shapes_dict["o"].append(nid)
 
         node_catalog_info = {}
         for shape_marker, nlist in shapes_dict.items():
@@ -338,7 +364,7 @@ class GraphVisualizer:
 
         labels_dict = {n: str(n) for n in nodes_to_draw}
         outline_effect = [pe.withStroke(linewidth=3, foreground='white')]
-        texts = nx.draw_networkx_labels(G, pos, labels=labels_dict, font_size=11, font_weight="bold", font_color="black", ax=ax)
+        texts = nx.draw_networkx_labels(G, pos, labels=labels_dict, font_size=14, font_weight="bold", font_color="black", ax=ax)
         for t in texts.values():
             t.set_path_effects(outline_effect)
 
@@ -347,7 +373,7 @@ class GraphVisualizer:
             mpatches.Patch(facecolor=cmap(0.5), edgecolor='k', label='Neutral Sim (White)'),
             mpatches.Patch(facecolor=cmap(0.1), edgecolor='k', label='Low Semantic Sim (Blue)')
         ]
-        ax.legend(handles=legend_elements, loc='upper left', title="Color: Similarity", fontsize=10, title_fontsize=12)
+        ax.legend(handles=legend_elements, loc='upper left', title="Color: Similarity", fontsize=12, title_fontsize=14)
 
         ax.text(0.95, 0.95, 'Shapes:\n■ Center\n★ Macro Cluster\n▲/▼ Topology Hubs\n● Normal Node', 
                 transform=ax.transAxes, fontsize=12, verticalalignment='top', horizontalalignment='right',

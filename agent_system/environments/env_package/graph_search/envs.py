@@ -39,7 +39,7 @@ class GraphSearchEnv:
 
         # 生成零文本同心圆雷达图，并接收锚点映射
         img_bytes, node_catalog_info, all_classes, anchor_mapping = self.visualizer.draw_vgraph_radar_layout(int(self.center_id))
-        self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((1024, 1024), Image.Resampling.LANCZOS))
+        self.current_image = np.array(Image.open(io.BytesIO(img_bytes)).convert("RGB").resize((512, 512), Image.Resampling.LANCZOS))
         
         for real_id in node_catalog_info.keys():
             self.valid_nodes_in_view.add(int(real_id))
@@ -80,7 +80,7 @@ class GraphSearchEnv:
         reward = 0.0
         obs = ""
         current_action = raw_input.strip()
-        img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((1024,1024,3), dtype=np.uint8)
+        img_ret = self.current_image.copy() if self.current_image is not None else np.zeros((512,512,3), dtype=np.uint8)
 
         if self.done:
              return "Episode already finished.", img_ret, 0.0, True, {
