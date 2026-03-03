@@ -110,7 +110,7 @@ class GraphSearchEnv:
             # 按批次累加惩罚
             self.check_batch_count += 1
             if self.check_batch_count > 2:
-                reward += -0.05 
+                reward += 0
 
             obs_lines = []
             for tid in target_ids:

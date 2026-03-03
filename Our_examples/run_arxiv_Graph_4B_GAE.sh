@@ -104,7 +104,7 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=True \
     env.env_name=graph_search/GraphSearchEnv \
     env.seed=42 \
-    env.max_steps=10 \
+    env.max_steps=6 \
     env.rollout.n=$group_size \
     env.resources_per_worker.num_cpus=$num_cpus_per_env_worker \
     env.node_text_path=$NODE_TEXT_PATH \
