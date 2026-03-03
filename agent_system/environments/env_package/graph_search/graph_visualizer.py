@@ -16,6 +16,9 @@ import matplotlib.patches as mpatches
 from collections import defaultdict
 
 class GraphVisualizer:
+    # [优化] 类级别全局缓存
+    _GLOBAL_DATA_CACHE = {}
+
     @staticmethod
     def load_graph_data(dataset_name: str, dataset_dir: str) -> Tuple[Dict, Dict, Dict]:
         file_path = os.path.join(dataset_dir, f"{dataset_name}.json")
@@ -57,48 +60,79 @@ class GraphVisualizer:
 
     def __init__(self, dataset_name: str, dataset_dir: str = "./datasets", shared_data: Optional[Tuple[Dict, Dict, Dict, Any]] = None):
         self.BASE_FIG_SIZE = 12 
+        self.dataset_name = dataset_name
         
-        if shared_data is not None:
-            self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
-            self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
+        # [优化] 优先从缓存加载，彻底消除重复校准的开销
+        if dataset_name in GraphVisualizer._GLOBAL_DATA_CACHE and shared_data is None:
+            cache = GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name]
+            self.graph_data = cache['graph_data']
+            self.reverse_adj = cache['reverse_adj']
+            self.class_map = cache['class_map']
+            self.feat_matrix = cache['feat_matrix']
+            self.all_node_ids = cache['all_node_ids']
+            self.id_to_idx = cache['id_to_idx']
+            self.global_degrees = cache['global_degrees']
+            self.global_sim_min = cache['sim_min']
+            self.global_sim_max = cache['sim_max']
+            self.proxy_class_anchors = cache['anchors']
+            self.global_confusion_matrix = cache['confusion']
         else:
-            self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
-            self.feat_matrix = self._build_feat_matrix()
-        
-        self.all_node_ids = list(self.graph_data.keys())
-        self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
+            if shared_data is not None:
+                self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
+                self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
+            else:
+                self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
+                self.feat_matrix = self._build_feat_matrix()
+            
+            self.all_node_ids = list(self.graph_data.keys())
+            self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
+            self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
+            
+            # 执行耗时的全局统计
+            self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
+            self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+            
+            # 写入缓存
+            if shared_data is None:
+                GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name] = {
+                    'graph_data': self.graph_data,
+                    'reverse_adj': self.reverse_adj,
+                    'class_map': self.class_map,
+                    'feat_matrix': self.feat_matrix,
+                    'all_node_ids': self.all_node_ids,
+                    'id_to_idx': self.id_to_idx,
+                    'global_degrees': self.global_degrees,
+                    'sim_min': self.global_sim_min,
+                    'sim_max': self.global_sim_max,
+                    'anchors': self.proxy_class_anchors,
+                    'confusion': self.global_confusion_matrix
+                }
 
-        self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
-        
-        # [新增] 1. 优先校准全局特征相似度的真实分布范围
-        self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
-        
-        self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
-
-    def _calibrate_global_sim(self, sample_size=1000) -> Tuple[float, float]:
-        """随机抽样全局节点对，寻找特征相似度的真实有效分布区间，用于色谱拉伸"""
-        print("[GraphVisualizer] 正在校准全局特征相似度分布以优化色谱渲染...")
+    def _calibrate_global_sim(self, sample_size=800) -> Tuple[float, float]:
+        """[优化] 向量化加速特征相似度分布校准"""
+        print(f"[GraphVisualizer] 正在校准 '{self.dataset_name}' 的全局特征相似度分布...")
         num_nodes = len(self.feat_matrix)
         if num_nodes < 2: 
             return 0.0, 1.0
         
         idx1 = np.random.randint(0, num_nodes, sample_size)
         idx2 = np.random.randint(0, num_nodes, sample_size)
-        sims = np.sum(self.feat_matrix[idx1] * self.feat_matrix[idx2], axis=1)
         
-        # 截取 4% 和 96% 分位数，去除极端离群值，让主体分布撑满红蓝两极
-        global_min = float(np.percentile(sims, 4))
-        global_max = float(np.percentile(sims, 96))
+        # 使用 einsum 提升批量点积计算速度
+        sims = np.einsum('ij,ij->i', self.feat_matrix[idx1], self.feat_matrix[idx2])
+        
+        # 截取 4% 和 96% 分位数
+        global_min, global_max = np.percentile(sims, [4, 96])
         
         if global_max - global_min < 1e-5:
             global_min -= 0.1
             global_max += 0.1
             
         print(f"[GraphVisualizer] 色谱拉伸校准完毕: 纯蓝(4%)={global_min:.4f}, 纯红(96%)={global_max:.4f}")
-        return global_min, global_max
+        return float(global_min), float(global_max)
 
     def _build_robust_anchors_and_confusion(self):
-        print("[GraphVisualizer] 正在离线构建鲁棒类锚点与全局混淆矩阵...")
+        print(f"[GraphVisualizer] 正在离线构建 '{self.dataset_name}' 的鲁棒类锚点与全局混淆矩阵...")
         class_candidates = defaultdict(list)
         confusion_matrix = defaultdict(int)
         
@@ -232,7 +266,7 @@ class GraphVisualizer:
         outer_circle_nodes = outer_circle_2hop + global_hubs_to_add
         nodes_to_draw = [center_id] + inner_circle_nodes + outer_circle_nodes
         
-        # [核心修复] 2. 基于“全局分布校准”计算颜色映射，根治表示退化与局部失真
+        # [核心修复] 2. 基于“全局分布校准”计算颜色映射
         center_idx = self.id_to_idx.get(str(center_id))
         center_feat = self.feat_matrix[center_idx]
         
@@ -288,8 +322,7 @@ class GraphVisualizer:
         edges_1hop = [(u, v) for u, v in G.edges() if u == center_id or v == center_id]
         edges_other = [(u, v) for u, v in G.edges() if u != center_id and v != center_id]
         
-        # ---------- 修改后的代码 ----------
-        # 1. 中心辐射实线：加深为 dimgray，透明度提高到 0.85，确保作为视觉锚点足够清晰
+        # 1. 中心辐射实线
         nx.draw_networkx_edges(
             G, pos, 
             edgelist=edges_1hop, 
@@ -299,7 +332,7 @@ class GraphVisualizer:
             ax=ax
         )
         
-        # 2. 其他上下文虚线：颜色改为 gray，透明度提升至 0.65，既能看清走向，又不会盖过中心线的风头
+        # 2. 其他上下文虚线
         nx.draw_networkx_edges(
             G, pos, 
             edgelist=edges_other, 
@@ -310,7 +343,6 @@ class GraphVisualizer:
             ax=ax
         )
 
-        
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         
         # 1. 预先处理中心节点和全局节点
@@ -325,7 +357,8 @@ class GraphVisualizer:
         
         # 3. 计算度数并分类
         for nid in local_nodes:
-            deg = self.get_node_degree_info(nid)
+            # 优化：直接使用在 __init__ 中算好的 global_degrees
+            deg = self.global_degrees[str(nid)]
             in_d = deg["in_degree"]
             out_d = deg["out_degree"]
             
@@ -355,7 +388,18 @@ class GraphVisualizer:
         for shape_marker, nlist in shapes_dict.items():
             if not nlist: continue
             colors = [node_colors[n] for n in nlist]
-            size = 3500 if shape_marker == "s" else (2200 if shape_marker in ["*", "^", "v"] else 1800)
+            
+            # ---------- 节点尺寸逻辑 ----------
+            if shape_marker == "*":
+                size = 3000  # 星星 (Macro Hub)
+            elif shape_marker == "s":
+                size = 3500  # 中心节点
+            elif shape_marker in ["^", "v"]:
+                size = 2500  # 拓扑 Hubs (三角形)
+            else:
+                size = 2000  # 普通节点 (圆形)
+            # -----------------------------------------
+            
             nx.draw_networkx_nodes(G, pos, nodelist=nlist, node_color=colors, edgecolors="black", linewidths=2.0, node_size=size, node_shape=shape_marker, ax=ax)
             
             role_map = {"s": "Center", "*": "Macro Hub", "^": "In-Hub", "v": "Out-Hub", "o": "Normal"}
