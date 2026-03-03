@@ -288,9 +288,28 @@ class GraphVisualizer:
         edges_1hop = [(u, v) for u, v in G.edges() if u == center_id or v == center_id]
         edges_other = [(u, v) for u, v in G.edges() if u != center_id and v != center_id]
         
-        nx.draw_networkx_edges(G, pos, edgelist=edges_1hop, alpha=0.6, edge_color="gray", width=2.5, ax=ax)
-        nx.draw_networkx_edges(G, pos, edgelist=edges_other, alpha=0.3, edge_color="lightgray", style="dashed", width=1.5, ax=ax)
-
+        # ---------- 修改后的代码 ----------
+        # 1. 中心辐射实线：加深为 dimgray，透明度提高到 0.85，确保作为视觉锚点足够清晰
+        nx.draw_networkx_edges(
+            G, pos, 
+            edgelist=edges_1hop, 
+            alpha=0.85, 
+            edge_color="dimgray", 
+            width=2.5, 
+            ax=ax
+        )
+        
+        # 2. 其他上下文虚线：颜色改为 gray，透明度提升至 0.65，既能看清走向，又不会盖过中心线的风头
+        nx.draw_networkx_edges(
+            G, pos, 
+            edgelist=edges_other, 
+            alpha=0.65, 
+            edge_color="gray", 
+            style="dashed", 
+            width=1.5, 
+            ax=ax
+        )
+        
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         for nid in nodes_to_draw:
             if nid == center_id:
