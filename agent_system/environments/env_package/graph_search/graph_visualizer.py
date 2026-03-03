@@ -75,7 +75,7 @@ class GraphVisualizer:
         
         self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
 
-    def _calibrate_global_sim(self, sample_size=10000) -> Tuple[float, float]:
+    def _calibrate_global_sim(self, sample_size=1000) -> Tuple[float, float]:
         """随机抽样全局节点对，寻找特征相似度的真实有效分布区间，用于色谱拉伸"""
         print("[GraphVisualizer] 正在校准全局特征相似度分布以优化色谱渲染...")
         num_nodes = len(self.feat_matrix)
@@ -86,9 +86,9 @@ class GraphVisualizer:
         idx2 = np.random.randint(0, num_nodes, sample_size)
         sims = np.sum(self.feat_matrix[idx1] * self.feat_matrix[idx2], axis=1)
         
-        # 截取 2% 和 98% 分位数，去除极端离群值，让主体分布撑满红蓝两极
-        global_min = float(np.percentile(sims, 2))
-        global_max = float(np.percentile(sims, 98))
+        # 截取 4% 和 96% 分位数，去除极端离群值，让主体分布撑满红蓝两极
+        global_min = float(np.percentile(sims, 4))
+        global_max = float(np.percentile(sims, 96))
         
         if global_max - global_min < 1e-5:
             global_min -= 0.1
@@ -309,7 +309,7 @@ class GraphVisualizer:
             width=1.5, 
             ax=ax
         )
-        
+
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         for nid in nodes_to_draw:
             if nid == center_id:
