@@ -66,7 +66,7 @@ class GraphSearchEnv:
             f"★ **特别情报 (宏观锚点导航)** ★：图边缘的星形节点 (★) 是几个类别代表：\n"
             f"{anchor_bullet_points}\n\n"
             f"你可以自由结合视觉发现，先进行思考，再调用action。调用查阅动作：`<action>check_nodes([ID1, ID2, ...])</action>`。\n"
-            f"注意：单次动作最多允许带 5 个 ID，总查阅次数没有限制，但最终答案需要在6步内给出。\n\n"
+            f"注意：单次动作最多允许带 5 个 ID。\n\n"
             f"可选类别: [{candidates_str}]\n"
         )
 

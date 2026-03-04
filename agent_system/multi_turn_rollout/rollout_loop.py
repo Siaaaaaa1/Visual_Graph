@@ -539,28 +539,77 @@ class TrajectoryCollector:
         total_envs = len(env_modes)
         sys1_ratio = sys1_count / total_envs if total_envs > 0 else 0
 
+        # ==========================================
+        # 新增统计：Best@G, Mean@G 和 Trajectory 步数分布
+        # ==========================================
+        best_at_g = 0.0
+        mean_at_g = 0.0
+        step_counts = {}
+        outcomes_2d = None
+
+        if total_success is not None and 'success_rate' in total_success:
+            outcomes = np.array(total_success['success_rate'])
+        else:
+            outcomes = rewards.flatten().cpu().numpy()
+
+        if len(outcomes) == rewards_2d.numel():
+            outcomes_2d = outcomes.reshape(-1, group_size)
+            # 只要组内有一个成功（>=1.0），就算作该组 Best 成功
+            group_best = np.max(outcomes_2d >= 1.0, axis=1) 
+            best_at_g = np.mean(group_best)
+            mean_at_g = np.mean(outcomes_2d >= 1.0)
+            
+        if total_batch_list is not None:
+            for i in range(len(total_batch_list)):
+                # 统计每条轨迹有效的 step 数量
+                valid_steps = sum(1 for step in total_batch_list[i] if step.get('active_masks', True))
+                step_counts[valid_steps] = step_counts.get(valid_steps, 0) + 1
+
         print("\n" + "="*50)
         print("🎯 [GRPO Advantage & Reward Analytics]")
         print(f"🔹 Total Prompt Groups (Batches): {batch_size} | Group Size (G): {group_size}")
         print(f"🔹 Sys1/Sys2 Ratio: {sys1_ratio:.1%} / {1 - sys1_ratio:.1%}")
         print(f"🔹 Vanishing Ratio: {vanishing_ratio:.1%} ({dead_groups}/{batch_size} zero-variance groups)")
+        print(f"🔹 Best@{group_size} Success Rate: {best_at_g:.1%}")
+        print(f"🔹 Mean@{group_size} Success Rate: {mean_at_g:.1%}")
+        
+        print("\n🔹 Trajectory Step Distribution:")
+        for length in sorted(step_counts.keys()):
+            print(f"   - {length} steps: {step_counts[length]} trajectories")
         print("-" * 50)
         
-        show_batches = min(6, batch_size) 
-        
-        for i in range(show_batches):
+        # ==========================================
+        # 修改输出：输出完整的 prompt Group，并列出组内所有轨迹的 Steps Reward 和 Outcome
+        # ==========================================
+        print("\n📝 [Detailed Group & Trajectory Analytics]")
+        for i in range(batch_size):
             r_group = rewards_2d[i].cpu().numpy()
             a_group = advantages[i].cpu().numpy()
             mode_idx = i * group_size
             mode = env_modes[mode_idx] if mode_idx < len(env_modes) else "Unknown"
             
             print(f"📦 [Prompt Group {i} | Mode: {mode}]")
-            print(f"   Rewards:    [{', '.join([f'{x:5.2f}' for x in r_group])}] (Mean: {group_mean[i].item():.2f}, Std: {group_std[i].item():.2f})")
-            print(f"   Advantages: [{', '.join([f'{x:5.2f}' for x in a_group])}]")
+            print(f"   Group Rewards:    [{', '.join([f'{x:5.2f}' for x in r_group])}] (Mean: {group_mean[i].item():.2f}, Std: {group_std[i].item():.2f})")
+            print(f"   Group Advantages: [{', '.join([f'{x:5.2f}' for x in a_group])}]")
             if group_std[i].item() <= 1e-6:
                 print("   ⚠️ WARNING: Zero Variance! Advantages collapsed to 0.")
+            
+            # 输出每个 Trajectory 的单步 Rewards 和结果 Outcome
+            if total_batch_list is not None and outcomes_2d is not None:
+                for j in range(group_size):
+                    global_idx = i * group_size + j
+                    traj_steps = total_batch_list[global_idx]
+                    
+                    # 提取每一步的 reward
+                    step_rewards = [step.get('step_reward', 0.0) for step in traj_steps if step.get('active_masks', True)]
+                    step_rew_str = ", ".join([f"{sr:5.2f}" for sr in step_rewards])
+                    outcome = outcomes_2d[i][j]
+                    
+                    print(f"   -> Traj {j} ({len(step_rewards)} steps): Steps Reward [{step_rew_str}] | Outcome Reward: {outcome:.2f}")
+
             print("-" * 50)
 
+        # 保留原本针对成功/失败轨迹的抽样详细文本打印逻辑
         if total_batch_list is not None and total_success is not None:
             flat_advantages = advantages.flatten().cpu().numpy()
             flat_rewards = rewards.flatten().cpu().numpy()
@@ -568,7 +617,8 @@ class TrajectoryCollector:
             
             stats = {
                 "System1": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []},
-                "System2": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []}
+                "System2": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []},
+                "V-GraphAgent": {"success": 0, "fail": 0, "advs": [], "step_rewards": [], "traj_indices": []}
             }
 
             for i in range(len(total_batch_list)):
@@ -589,10 +639,9 @@ class TrajectoryCollector:
                         stats[mode]["step_rewards"].append(step_data.get('step_reward', 0.0))
 
             print("\n📊 [Mode-wise Detailed Statistics]")
-            for mode in ["System1", "System2"]:
+            for mode in stats.keys():
                 s = stats[mode]
                 if not s["traj_indices"]:
-                    print(f"🔹 {mode}: No samples found.")
                     continue
                 
                 mean_adv = np.mean(s["advs"]) if s["advs"] else 0.0
@@ -605,7 +654,7 @@ class TrajectoryCollector:
 
             print("\n🎲 [Random Trajectory Samples (Filtered <|image_pad|>)]")
             import random
-            for mode in ["System1", "System2"]:
+            for mode in stats.keys():
                 s = stats[mode]
                 if not s["traj_indices"]:
                     continue
@@ -666,12 +715,12 @@ class TrajectoryCollector:
                 for i in range(0, len(outcomes), group_size):
                     group_slice = outcomes[i : i + group_size]
                     
-                    if np.all(group_slice == 0) or np.all(group_slice == 1):
-                        total_episode_rewards[i : i + group_size] = 0.0
-                        for j in range(i, i + group_size):
-                            for step_data in total_batch_list[j]:
-                                step_data['step_reward'] = 0.0
-                                step_data['is_filtered'] = True 
+                    # if np.all(group_slice == 0) or np.all(group_slice == 1):
+                    #     total_episode_rewards[i : i + group_size] = 0.0
+                    #     for j in range(i, i + group_size):
+                    #         for step_data in total_batch_list[j]:
+                    #             step_data['step_reward'] = 0.0
+                    #             step_data['is_filtered'] = True 
                     
                     group_outcomes = total_episode_rewards[i : i + group_size]
                     mean = np.mean(group_outcomes)
