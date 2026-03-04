@@ -14,7 +14,7 @@ class EpisodeRewardManager:
         
         # [修复 2] 正则匹配：只强制校验 <action> 闭环是否存在，允许模型跳过 <think> 直接行动
         self.format_pattern = re.compile(
-            r"<action>.*?</action>", 
+            r"<think>.*?</think>\s*<action>.*?</action>",
             re.DOTALL | re.IGNORECASE
         )
                 
