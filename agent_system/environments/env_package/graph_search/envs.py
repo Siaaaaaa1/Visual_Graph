@@ -54,19 +54,18 @@ class GraphSearchEnv:
         # 组装锚点情报文本
         anchor_str_lines = []
         for nid, cls_name in anchor_mapping.items():
-            anchor_str_lines.append(f"   - 节点 {nid} : 代表【{cls_name}】领域")
+            anchor_str_lines.append(f"   - 节点 {nid} : 大概率属于【{cls_name}】领域")
         anchor_bullet_points = "\n".join(anchor_str_lines) if anchor_str_lines else "   - (无)"
         
         obs = (
             f"🎯 任务：请预测目标中心节点 **{self.center_id}** 的准确类别。\n\n"
             f"【中心节点基础先验】\n"
-            f"* Title: {center_title}\n"
-            f"* Proxy Predicted Labels (Prior Hypothesis): {center_proxy}\n\n"
+            f"* {center_title}\n"
             f"【操作指南与视图说明】\n"
             f"图上展示了其局部结构的同心圆雷达图。\n"
-            f"★ **特别情报 (宏观锚点导航)** ★：图边缘的星形节点 (★) 是我们为你精选的各路学科代表（包含先验类别、易混淆类别、以及视觉上极具欺骗性的特征相似类别）。它们的身份如下：\n"
+            f"★ **特别情报 (宏观锚点导航)** ★：图边缘的星形节点 (★) 是几个类别代表：\n"
             f"{anchor_bullet_points}\n\n"
-            f"你可以自由结合视觉发现，调用查阅动作：`<action>check_nodes([ID1, ID2, ...])</action>`。\n"
+            f"你可以自由结合视觉发现，先进行思考，再调用action。调用查阅动作：`<action>check_nodes([ID1, ID2, ...])</action>`。\n"
             f"注意：单次动作最多允许带 5 个 ID，总查阅次数没有限制，但最终答案需要在6步内给出。\n\n"
             f"可选类别: [{candidates_str}]\n"
         )
