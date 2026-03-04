@@ -26,7 +26,7 @@ class GraphSearchEnv:
         self.failure_reason = "Timeout"
         
     def _get_title_and_abstract(self, raw_text: str) -> Tuple[str, str]:
-        parts = raw_text.split("Abstract:", 1)
+        parts = raw_text.split("abstract:", 1)
         title_part = parts[0].replace("Title:", "").strip()
         abstract_part = parts[1].strip() if len(parts) > 1 else "No abstract."
         return title_part, abstract_part
@@ -67,7 +67,7 @@ class GraphSearchEnv:
             f"★ **特别情报 (宏观锚点导航)** ★：图边缘的星形节点 (★) 是我们为你精选的各路学科代表（包含先验类别、易混淆类别、以及视觉上极具欺骗性的特征相似类别）。它们的身份如下：\n"
             f"{anchor_bullet_points}\n\n"
             f"你可以自由结合视觉发现，调用查阅动作：`<action>check_nodes([ID1, ID2, ...])</action>`。\n"
-            f"注意：单次动作最多允许带 5 个 ID。总查阅次数没有硬性限制，但前两批免费，从查阅第 3 批起产生微小惩罚。如果不查阅盲猜失败将扣 -2.0 分。\n\n"
+            f"注意：单次动作最多允许带 5 个 ID，总查阅次数没有限制，但最终答案需要在6步内给出。\n\n"
             f"可选类别: [{candidates_str}]\n"
         )
 
@@ -141,7 +141,7 @@ class GraphSearchEnv:
             else:
                 if self.check_node_count == 0:
                     reward = -2.0  # 致命的盲目自信惩罚
-                    obs = "预测错误！致命惩罚：未查阅任何视图证据即盲听先验。"
+                    obs = "预测错误！"
                 else:
                     reward = -1.0
                     obs = "预测错误。"
