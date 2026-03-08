@@ -8,16 +8,19 @@ from PIL import Image
 from typing import Dict, Any, Tuple, List, Optional
 import time
 import matplotlib
+matplotlib.use('Agg')
 import matplotlib.cm as cm
 import matplotlib.patheffects as pe
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import matplotlib.patches as mpatches
 from collections import defaultdict
+import threading
 
 class GraphVisualizer:
     # [优化] 类级别全局缓存
     _GLOBAL_DATA_CACHE = {}
+    _CACHE_LOCK = threading.Lock()
 
     @staticmethod
     def load_graph_data(dataset_name: str, dataset_dir: str) -> Tuple[Dict, Dict, Dict]:
@@ -62,51 +65,52 @@ class GraphVisualizer:
         self.BASE_FIG_SIZE = 12 
         self.dataset_name = dataset_name
         
-        # [优化] 优先从缓存加载，彻底消除重复校准的开销
-        if dataset_name in GraphVisualizer._GLOBAL_DATA_CACHE and shared_data is None:
-            cache = GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name]
-            self.graph_data = cache['graph_data']
-            self.reverse_adj = cache['reverse_adj']
-            self.class_map = cache['class_map']
-            self.feat_matrix = cache['feat_matrix']
-            self.all_node_ids = cache['all_node_ids']
-            self.id_to_idx = cache['id_to_idx']
-            self.global_degrees = cache['global_degrees']
-            self.global_sim_min = cache['sim_min']
-            self.global_sim_max = cache['sim_max']
-            self.proxy_class_anchors = cache['anchors']
-            self.global_confusion_matrix = cache['confusion']
-        else:
-            if shared_data is not None:
-                self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
-                self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
+        with self._CACHE_LOCK:
+            # [优化] 优先从缓存加载，彻底消除重复校准的开销
+            if dataset_name in GraphVisualizer._GLOBAL_DATA_CACHE and shared_data is None:
+                cache = GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name]
+                self.graph_data = cache['graph_data']
+                self.reverse_adj = cache['reverse_adj']
+                self.class_map = cache['class_map']
+                self.feat_matrix = cache['feat_matrix']
+                self.all_node_ids = cache['all_node_ids']
+                self.id_to_idx = cache['id_to_idx']
+                self.global_degrees = cache['global_degrees']
+                self.global_sim_min = cache['sim_min']
+                self.global_sim_max = cache['sim_max']
+                self.proxy_class_anchors = cache['anchors']
+                self.global_confusion_matrix = cache['confusion']
             else:
-                self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
-                self.feat_matrix = self._build_feat_matrix()
-            
-            self.all_node_ids = list(self.graph_data.keys())
-            self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
-            self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
-            
-            # 执行耗时的全局统计
-            self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
-            self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
-            
-            # 写入缓存
-            if shared_data is None:
-                GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name] = {
-                    'graph_data': self.graph_data,
-                    'reverse_adj': self.reverse_adj,
-                    'class_map': self.class_map,
-                    'feat_matrix': self.feat_matrix,
-                    'all_node_ids': self.all_node_ids,
-                    'id_to_idx': self.id_to_idx,
-                    'global_degrees': self.global_degrees,
-                    'sim_min': self.global_sim_min,
-                    'sim_max': self.global_sim_max,
-                    'anchors': self.proxy_class_anchors,
-                    'confusion': self.global_confusion_matrix
-                }
+                if shared_data is not None:
+                    self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
+                    self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
+                else:
+                    self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
+                    self.feat_matrix = self._build_feat_matrix()
+                
+                self.all_node_ids = list(self.graph_data.keys())
+                self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
+                self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
+                
+                # 执行耗时的全局统计
+                self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
+                self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+                
+                # 写入缓存
+                if shared_data is None:
+                    GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name] = {
+                        'graph_data': self.graph_data,
+                        'reverse_adj': self.reverse_adj,
+                        'class_map': self.class_map,
+                        'feat_matrix': self.feat_matrix,
+                        'all_node_ids': self.all_node_ids,
+                        'id_to_idx': self.id_to_idx,
+                        'global_degrees': self.global_degrees,
+                        'sim_min': self.global_sim_min,
+                        'sim_max': self.global_sim_max,
+                        'anchors': self.proxy_class_anchors,
+                        'confusion': self.global_confusion_matrix
+                    }
 
     def _calibrate_global_sim(self, sample_size=800) -> Tuple[float, float]:
         """[优化] 向量化加速特征相似度分布校准"""

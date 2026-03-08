@@ -264,6 +264,8 @@ class TrajectoryCollector:
              
         obs, infos = envs.reset(kwargs=env_kwargs)
 
+        initial_images = obs.get('image', None)
+
         lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
         assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"
         
@@ -290,6 +292,9 @@ class TrajectoryCollector:
         action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
 
         for _step in range(self.config.env.max_steps):
+            if initial_images is not None:
+                obs['image'] = initial_images
+
             active_masks = np.logical_not(is_done)
 
             batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs, step=_step)
@@ -783,10 +788,7 @@ class TrajectoryCollector:
             elif isinstance(obj, (list, tuple)):
                 return [make_serializable(x) for x in obj]
             elif isinstance(obj, bytes):
-                try:
-                    return obj.decode('utf-8')
-                except:
-                    return str(obj)
+                return "<BINARY_DATA_FILTERED>" #
             return obj
 
         output_dir = os.path.join(os.getcwd(), 'test')

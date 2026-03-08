@@ -155,7 +155,7 @@ class GraphSearchEnv:
             else:
                 failure_reason = "Timeout"
         elif not self.done and self.step_count >= self.max_steps:
-            self.done = True; reward = -1.0; failure_reason = "Timeout"
+            self.done = True; reward = -1.5; failure_reason = "Timeout"
 
         if self.done:
             self.is_won = (reward == 1.0)
