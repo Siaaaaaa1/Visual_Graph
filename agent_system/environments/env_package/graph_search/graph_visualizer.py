@@ -18,9 +18,12 @@ from collections import defaultdict
 import threading
 
 class GraphVisualizer:
-    # [优化] 类级别全局缓存
+    # [优化] 类级别内存缓存
     _GLOBAL_DATA_CACHE = {}
     _CACHE_LOCK = threading.Lock()
+    
+    # [新增] 磁盘缓存配置
+    CACHE_DIR = "./graph_cache"
 
     @staticmethod
     def load_graph_data(dataset_name: str, dataset_dir: str) -> Tuple[Dict, Dict, Dict]:
@@ -65,22 +68,16 @@ class GraphVisualizer:
         self.BASE_FIG_SIZE = 12 
         self.dataset_name = dataset_name
         
+        # 确保磁盘缓存目录存在
+        if not os.path.exists(self.CACHE_DIR):
+            os.makedirs(self.CACHE_DIR)
+
         with self._CACHE_LOCK:
-            # [优化] 优先从缓存加载，彻底消除重复校准的开销
+            # 1. 优先尝试内存缓存加载
             if dataset_name in GraphVisualizer._GLOBAL_DATA_CACHE and shared_data is None:
-                cache = GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name]
-                self.graph_data = cache['graph_data']
-                self.reverse_adj = cache['reverse_adj']
-                self.class_map = cache['class_map']
-                self.feat_matrix = cache['feat_matrix']
-                self.all_node_ids = cache['all_node_ids']
-                self.id_to_idx = cache['id_to_idx']
-                self.global_degrees = cache['global_degrees']
-                self.global_sim_min = cache['sim_min']
-                self.global_sim_max = cache['sim_max']
-                self.proxy_class_anchors = cache['anchors']
-                self.global_confusion_matrix = cache['confusion']
+                self._load_from_memory_cache(dataset_name)
             else:
+                # 2. 加载/初始化基础图数据
                 if shared_data is not None:
                     self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
                     self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
@@ -92,25 +89,95 @@ class GraphVisualizer:
                 self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
                 self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
                 
-                # 执行耗时的全局统计
-                self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
-                self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+                # 3. 尝试从磁盘加载耗时的统计校准结果
+                if not self._load_from_disk_cache(dataset_name):
+                    # 4. 磁盘无缓存，执行计算并随后保存
+                    self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
+                    self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+                    self._save_to_disk_cache(dataset_name)
                 
-                # 写入缓存
+                # 5. 回填内存缓存
                 if shared_data is None:
-                    GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name] = {
-                        'graph_data': self.graph_data,
-                        'reverse_adj': self.reverse_adj,
-                        'class_map': self.class_map,
-                        'feat_matrix': self.feat_matrix,
-                        'all_node_ids': self.all_node_ids,
-                        'id_to_idx': self.id_to_idx,
-                        'global_degrees': self.global_degrees,
-                        'sim_min': self.global_sim_min,
-                        'sim_max': self.global_sim_max,
-                        'anchors': self.proxy_class_anchors,
-                        'confusion': self.global_confusion_matrix
-                    }
+                    self._update_memory_cache(dataset_name)
+
+    def _get_cache_file_path(self, dataset_name: str) -> str:
+        return os.path.join(self.CACHE_DIR, f"{dataset_name}_stats.json")
+
+    def _save_to_disk_cache(self, dataset_name: str):
+        """持久化存储全局分布和锚点"""
+        cache_path = self._get_cache_file_path(dataset_name)
+        # JSON 不支持元组键，需要将 (c1, c2) 转换为 "c1|c2"
+        serialized_confusion = {f"{k[0]}|{k[1]}": v for k, v in self.global_confusion_matrix.items()}
+        
+        cache_data = {
+            "sim_min": self.global_sim_min,
+            "sim_max": self.global_sim_max,
+            "anchors": self.proxy_class_anchors,
+            "confusion": serialized_confusion
+        }
+        
+        try:
+            with open(cache_path, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False, indent=2)
+            print(f"[GraphVisualizer] 离线统计数据已保存: {cache_path}")
+        except Exception as e:
+            print(f"[Warning] 磁盘缓存保存失败: {e}")
+
+    def _load_from_disk_cache(self, dataset_name: str) -> bool:
+        """从磁盘读取缓存，成功返回 True"""
+        cache_path = self._get_cache_file_path(dataset_name)
+        if not os.path.exists(cache_path):
+            return False
+            
+        try:
+            with open(cache_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            
+            self.global_sim_min = float(data["sim_min"])
+            self.global_sim_max = float(data["sim_max"])
+            self.proxy_class_anchors = data["anchors"]
+            
+            # 还原混淆矩阵的元组键
+            self.global_confusion_matrix = defaultdict(int)
+            for k, v in data["confusion"].items():
+                if "|" in k:
+                    c1, c2 = k.split("|", 1)
+                    self.global_confusion_matrix[(c1, c2)] = v
+            
+            print(f"[GraphVisualizer] 成功从磁盘载入 '{dataset_name}' 的离线校准值。")
+            return True
+        except Exception as e:
+            print(f"[Warning] 磁盘缓存加载异常 (可能是格式版本不匹配): {e}")
+            return False
+
+    def _load_from_memory_cache(self, dataset_name: str):
+        cache = GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name]
+        self.graph_data = cache['graph_data']
+        self.reverse_adj = cache['reverse_adj']
+        self.class_map = cache['class_map']
+        self.feat_matrix = cache['feat_matrix']
+        self.all_node_ids = cache['all_node_ids']
+        self.id_to_idx = cache['id_to_idx']
+        self.global_degrees = cache['global_degrees']
+        self.global_sim_min = cache['sim_min']
+        self.global_sim_max = cache['sim_max']
+        self.proxy_class_anchors = cache['anchors']
+        self.global_confusion_matrix = cache['confusion']
+
+    def _update_memory_cache(self, dataset_name: str):
+        GraphVisualizer._GLOBAL_DATA_CACHE[dataset_name] = {
+            'graph_data': self.graph_data,
+            'reverse_adj': self.reverse_adj,
+            'class_map': self.class_map,
+            'feat_matrix': self.feat_matrix,
+            'all_node_ids': self.all_node_ids,
+            'id_to_idx': self.id_to_idx,
+            'global_degrees': self.global_degrees,
+            'sim_min': self.global_sim_min,
+            'sim_max': self.global_sim_max,
+            'anchors': self.proxy_class_anchors,
+            'confusion': self.global_confusion_matrix
+        }
 
     def _calibrate_global_sim(self, sample_size=800) -> Tuple[float, float]:
         """[优化] 向量化加速特征相似度分布校准"""
@@ -136,7 +203,7 @@ class GraphVisualizer:
         return float(global_min), float(global_max)
 
     def _build_robust_anchors_and_confusion(self):
-        print(f"[GraphVisualizer] 正在离线构建 '{self.dataset_name}' 的鲁棒类锚点与全局混淆矩阵...")
+        print(f"[GraphVisualizer] 正在构建 '{self.dataset_name}' 的鲁棒类锚点与全局混淆矩阵...")
         class_candidates = defaultdict(list)
         confusion_matrix = defaultdict(int)
         
@@ -200,7 +267,7 @@ class GraphVisualizer:
 
     def draw_vgraph_radar_layout(self, center_id: int, max_1hop: int = 15, max_2hop: int = 10, max_global: int = 5) -> Tuple[bytes, Dict[str, Dict], List[str], Dict[int, str]]:
         
-        # 1. 挑选节点构建视图 (与你之前的实现一致)
+        # 1. 挑选节点构建视图
         nbs_1hop = self._get_neighbors(center_id, undirected=True)
         if center_id in nbs_1hop: nbs_1hop.remove(center_id)
         
@@ -275,7 +342,6 @@ class GraphVisualizer:
         node_sims = {}
         cmap = cm.coolwarm
         
-        # 使用你之前的 min/max 或者提供一个默认值
         global_sim_min = getattr(self, 'global_sim_min', 0.0)
         global_sim_max = getattr(self, 'global_sim_max', 1.0)
         
@@ -286,8 +352,6 @@ class GraphVisualizer:
             else:
                 idx = self.id_to_idx.get(str(nid))
                 sim = float(self.feat_matrix[idx].dot(center_feat)) if idx is not None else 0.0
-                
-                # 防止除零
                 denom = (global_sim_max - global_sim_min)
                 if denom < 1e-5:
                     norm_sim = 0.5
@@ -310,16 +374,11 @@ class GraphVisualizer:
                     G.add_edge(u, v)
 
         # ==========================================
-        # 【关键修改】参考 draw_subgraph 中的纯角度均匀排布
-        # 彻底避免力导向算法可能带来的紧贴问题
+        # 【关键布局】纯角度均匀排布，彻底避免紧贴问题
         # ==========================================
-        
-        # 提取各个圈层的节点 (这里相当于你 draw_subgraph 里的 hop1_nodes 和 other_nodes)
         hop1_nodes = inner_circle_nodes
         other_nodes = outer_circle_nodes
         
-        # 使用图拓扑布局算出各个节点的初始角度，确保有连边的节点在角度上相近
-        # 这一步参考了你的做法，是为了在按角度均分前，先用 spring layout 获得一个大概的方位倾向
         G_topo = G.copy()
         for n in G_topo.nodes():
             if n != center_id and not G_topo.has_edge(center_id, n):
@@ -335,11 +394,9 @@ class GraphVisualizer:
             dy = topo_pos[n][1] - cy
             node_angles[n] = np.arctan2(dy, dx)
             
-        # 根据拓扑角度对节点进行排序
         hop1_nodes.sort(key=lambda n: node_angles[n])
         other_nodes.sort(key=lambda n: node_angles[n])
 
-        # 定义一个函数：根据相似度计算动态半径
         def get_dynamic_radii(nodes_list, r_min, r_max):
             if not nodes_list: return {}
             sims = [node_sims[n] for n in nodes_list]
@@ -351,22 +408,19 @@ class GraphVisualizer:
             
             for n in nodes_list:
                 norm_sim = (node_sims[n] - s_min) / (s_max - s_min)
-                radii[n] = r_max - norm_sim * (r_max - r_min) # 相似度越高，越靠近内侧 r_min
+                radii[n] = r_max - norm_sim * (r_max - r_min) 
             return radii
 
         pos = {center_id: np.array([0.0, 0.0])}
         
-        # 计算 1-hop 圈层的半径和坐标
         r1_base = max(4.0, len(hop1_nodes) * 0.4) 
         r1_min, r1_max = r1_base, r1_base + 1.5
         r_dict_1hop = get_dynamic_radii(hop1_nodes, r1_min, r1_max)
         
-        # 计算 2-hop / Global 圈层的半径和坐标
         r2_base = max(r1_max + 3.0, len(other_nodes) * 0.45)
         r2_min, r2_max = r2_base, r2_base + 2.0
         r_dict_other = get_dynamic_radii(other_nodes, r2_min, r2_max)
 
-        # 严格按照角度均分排布节点，彻底杜绝重叠
         if hop1_nodes:
             angle_step = 2 * np.pi / len(hop1_nodes)
             for i, n in enumerate(hop1_nodes):
@@ -376,13 +430,11 @@ class GraphVisualizer:
                 
         if other_nodes:
             angle_step = 2 * np.pi / len(other_nodes)
-            # 添加相位偏移，尽量避开 1-hop 节点的连线遮挡
             phase_shift = np.pi / len(other_nodes) if len(other_nodes) > 0 else 0
             for i, n in enumerate(other_nodes):
                 angle = i * angle_step + phase_shift
                 r = r_dict_other[n]
                 pos[n] = np.array([r * np.cos(angle), r * np.sin(angle)])
-
 
         # 4. 绘图渲染
         fig = Figure(figsize=(self.BASE_FIG_SIZE, self.BASE_FIG_SIZE))
@@ -395,13 +447,11 @@ class GraphVisualizer:
         nx.draw_networkx_edges(G, pos, edgelist=edges_1hop, alpha=0.85, edge_color="dimgray", width=2.5, ax=ax)
         nx.draw_networkx_edges(G, pos, edgelist=edges_other, alpha=0.65, edge_color="gray", style="dashed", width=1.5, ax=ax)
 
-        # 形状分配逻辑
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         shapes_dict["s"].append(center_id)
         shapes_dict["*"].extend([n for n in global_hubs_to_add if n in nodes_to_draw])
         
         local_nodes = [n for n in nodes_to_draw if n != center_id and n not in global_hubs_to_add]
-        
         potential_in_hubs = []
         potential_out_hubs = []
         
@@ -409,15 +459,11 @@ class GraphVisualizer:
             deg_info = self.get_node_degree_info(nid)
             in_d = deg_info.get("in_degree", 0)
             out_d = deg_info.get("out_degree", 0)
-            
-            if in_d > 5 and in_d >= out_d:
-                potential_in_hubs.append((nid, in_d))
-            elif out_d > 5 and out_d > in_d:
-                potential_out_hubs.append((nid, out_d))
+            if in_d > 5 and in_d >= out_d: potential_in_hubs.append((nid, in_d))
+            elif out_d > 5 and out_d > in_d: potential_out_hubs.append((nid, out_d))
                 
         potential_in_hubs.sort(key=lambda x: x[1], reverse=True)
         potential_out_hubs.sort(key=lambda x: x[1], reverse=True)
-        
         top_in_hubs = set(x[0] for x in potential_in_hubs[:2])
         top_out_hubs = set(x[0] for x in potential_out_hubs[:2])
         
@@ -430,52 +476,39 @@ class GraphVisualizer:
         for shape_marker, nlist in shapes_dict.items():
             if not nlist: continue
             colors = [node_colors[n] for n in nlist]
-            
             if shape_marker == "*": size = 3000
-            elif shape_marker == "s": size = 2200 # 参考了你的缩小修改
+            elif shape_marker == "s": size = 2200 
             elif shape_marker in ["^", "v"]: size = 2500
             else: size = 2000
             
             nx.draw_networkx_nodes(G, pos, nodelist=nlist, node_color=colors, edgecolors="black", linewidths=2.0, node_size=size, node_shape=shape_marker, ax=ax)
-            
             role_map = {"s": "Center", "*": "Macro Hub", "^": "In-Hub", "v": "Out-Hub", "o": "Normal"}
             for n in nlist:
                 node_catalog_info[str(n)] = {"role": role_map[shape_marker], "similarity": f"{node_sims[n]:.2f}"}
 
-        # ==========================================
-        # 标签渲染部分：同样参考你的优化做法，根据节点类型设定偏移和字号
-        # ==========================================
         max_radius = r2_max if other_nodes else (r1_max if hop1_nodes else 1.0)
         limit = max_radius * 1.2
-        
         label_pos = {}
         y_offset = limit * 0.035 
         
         for nid, (x, y) in pos.items():
-            if nid in top_out_hubs:
-                label_pos[nid] = (x, y + y_offset)
-            elif nid in top_in_hubs:
-                label_pos[nid] = (x, y - y_offset)
-            else:
-                label_pos[nid] = (x, y)
+            if nid in top_out_hubs: label_pos[nid] = (x, y + y_offset)
+            elif nid in top_in_hubs: label_pos[nid] = (x, y - y_offset)
+            else: label_pos[nid] = (x, y)
 
         labels_center = {center_id: str(center_id)}
         labels_normal = {nid: str(nid) for nid in G.nodes() if nid != center_id and len(str(nid)) < 5}
         labels_small = {nid: str(nid) for nid in G.nodes() if nid != center_id and len(str(nid)) >= 5}
-
         outline_effect = [pe.withStroke(linewidth=3, foreground='white')]
 
         texts_c = nx.draw_networkx_labels(G, label_pos, labels=labels_center, font_size=14, font_weight="bold", font_color="black", ax=ax)
         for t in texts_c.values(): t.set_path_effects(outline_effect)
-
         if labels_normal:
             texts_n = nx.draw_networkx_labels(G, label_pos, labels=labels_normal, font_size=12, font_weight="bold", font_color="black", ax=ax)
             for t in texts_n.values(): t.set_path_effects(outline_effect)
-                
         if labels_small:
             texts_s = nx.draw_networkx_labels(G, label_pos, labels=labels_small, font_size=10, font_weight="bold", font_color="black", ax=ax)
             for t in texts_s.values(): t.set_path_effects(outline_effect)
-
 
         legend_elements = [
             mpatches.Patch(facecolor=cmap(0.9), edgecolor='k', label='High Semantic Sim (Red)'),
@@ -483,7 +516,6 @@ class GraphVisualizer:
             mpatches.Patch(facecolor=cmap(0.1), edgecolor='k', label='Low Semantic Sim (Blue)')
         ]
         ax.legend(handles=legend_elements, loc='upper left', title="Color: Similarity", fontsize=12, title_fontsize=14)
-
         ax.text(0.95, 0.95, 'Shapes:\n■ Center\n★ Macro Cluster\n▲/▼ Topology Hubs\n● Normal Node', 
                 transform=ax.transAxes, fontsize=12, verticalalignment='top', horizontalalignment='right',
                 bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
