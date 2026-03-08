@@ -61,11 +61,11 @@ class EpisodeRewardManager:
                 if not (think_match and action_match):
                     # 连基本格式都没有，扣分
                     score += FORMAT_PENALTY_COEF
-                else:
-                    # 思考内容不足 50 个字符，视为偷懒作弊，扣分
-                    think_content = think_match.group(1).strip()
-                    if len(think_content) < 50:
-                        score += FORMAT_PENALTY_COEF
+                # else:
+                #     # 思考内容不足 50 个字符，视为偷懒作弊，扣分
+                #     think_content = think_match.group(1).strip()
+                #     if len(think_content) < 50:
+                #         score += FORMAT_PENALTY_COEF
 
             reward_tensor[i, valid_response_length - 1] = torch.tensor(score, dtype=torch.float32, device=prompt_ids.device)
 

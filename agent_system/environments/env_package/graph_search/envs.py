@@ -110,8 +110,8 @@ class GraphSearchEnv:
             self.check_batch_count += 1
             
             # 【修改点】：设置奖励封顶次数。只对前 3 次调用给与 +0.05 的探索奖励，后续不再给奖励，也不施加惩罚
-            if self.check_batch_count <= 3:
-                reward += 0.05
+            # if self.check_batch_count <= 3:
+            #     reward += 0.05
 
             obs_lines = []
             for tid in target_ids:

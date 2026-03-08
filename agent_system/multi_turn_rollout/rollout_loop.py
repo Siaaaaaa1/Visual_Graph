@@ -332,8 +332,6 @@ class TrajectoryCollector:
             next_obs, rewards, dones, infos = envs.step(text_actions)
             env_duration = time.time() - env_start_time
 
-            # 移除了此处原本的每个 step 的大量 print 代码
-
             if len(rewards.shape) == 2:
                 rewards = rewards.squeeze(1)
             if len(dones.shape) == 2:
@@ -362,7 +360,7 @@ class TrajectoryCollector:
             for i in range(batch_size):
                 batch_list[i]['step_reward'] = float(rewards[i] if np.isscalar(rewards[i]) else rewards[i].item())
                 
-                # [修复 5] 内存泄漏防线：在存入长期历史前，显式弹出所有多模态大张量对象
+                # [修复] 内存清理
                 batch_list[i].pop('multi_modal_inputs', None)
                 batch_list[i].pop('multi_modal_data', None)
 
@@ -387,16 +385,42 @@ class TrajectoryCollector:
                 break
 
         # =====================================================================
-        # 新增：所有轨迹结束后的统一打印逻辑（仅打印最后一个有效 step 的完整信息）
+        # 新增：同步 episode.py 的格式惩罚逻辑用于日志打印
         # =====================================================================
+        format_penalties = np.zeros(batch_size, dtype=np.float32)
+        FORMAT_PENALTY_COEF = -0.2 
+
+        for i in range(batch_size):
+            if not total_batch_list[i]:
+                continue
+            
+            # 找到最后一个有效 response 进行校验
+            final_response = ""
+            for step_data in reversed(total_batch_list[i]):
+                if step_data.get('active_masks', False):
+                    final_response = str(step_data.get('model_response_text', ''))
+                    break
+            
+            think_match = think_pattern.search(final_response)
+            action_match = action_pattern.search(final_response)
+            
+            if not (think_match and action_match):
+                format_penalties[i] = FORMAT_PENALTY_COEF
+            else:
+                think_content = think_match.group(1).strip()
+                if len(think_content) < 50:
+                    format_penalties[i] = FORMAT_PENALTY_COEF
+            
+            # 将惩罚项注入到最后一个 step 记录中
+            total_batch_list[i][-1]['format_penalty'] = format_penalties[i]
+
         print(f"\n{'='*40} TRAJECTORY ROLLOUT COMPLETE {'='*40}")
         for i in range(batch_size):
-            if i >= 1: break  # 保留你原有的逻辑：只抽样打印第一个样本的信息，防止日志刷屏
+            if i >= 1: break 
             
             if not total_batch_list[i]:
                 continue
             
-            # 提取最后一步的信息
             final_step_data = total_batch_list[i][-1]
             last_info = total_infos[i][-1] if total_infos[i] else {}
             
@@ -425,11 +449,11 @@ class TrajectoryCollector:
             print(f"\n[Parsed Structure]")
             print(f"  > Think: {think}")
             print(f"  > Action: {action}")
+            print(f"  > Format Penalty: {format_penalties[i]}") # 打印格式罚分
 
             raw_env_feedback = final_step_data.get('anchor_obs', 'N/A')
             print(f"\n[Raw Env Feedback (Result of final action)]:\n{raw_env_feedback}")
             print("-" * 60)
-        # =====================================================================
         
         success: Dict[str, np.ndarray] = envs.success_evaluator(
                     total_infos=total_infos,
@@ -457,7 +481,8 @@ class TrajectoryCollector:
                 print(f"  - {reason:<25}: {count:<4} ({percentage:.1f}%)")
             print("="*64 + "\n")
         
-        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings
+        # 返回增加 format_penalties
+        return total_batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, format_penalties
             
     def dynamic_multi_turn_loop(
             self,
@@ -516,7 +541,8 @@ class TrajectoryCollector:
         env_modes: list, 
         group_size: int, 
         total_batch_list: list = None, 
-        total_success: dict = None
+        total_success: dict = None,
+        format_penalties: np.ndarray = None  # 新增参数接收罚分
     ):
         if rewards.dim() == 1:
             if rewards.shape[0] % group_size != 0:
@@ -527,14 +553,25 @@ class TrajectoryCollector:
             rewards_2d = rewards
 
         batch_size = rewards_2d.shape[0]
+
+        # =====================================================================
+        # 核心修改：将环境奖励与格式惩罚合并，计算真实的训练奖励
+        # =====================================================================
+        if format_penalties is not None:
+            # 展平后相加，再重新 reshape
+            raw_rewards_flat = rewards.flatten().cpu().numpy()
+            total_rewards_flat = raw_rewards_flat + format_penalties.flatten()
+            training_rewards_2d = torch.tensor(total_rewards_flat, device=rewards.device, dtype=torch.float32).view(-1, group_size)
+        else:
+            training_rewards_2d = rewards_2d
         
-        group_mean = rewards_2d.mean(dim=-1, keepdim=True)
-        group_std = rewards_2d.std(dim=-1, keepdim=True)
+        group_mean = training_rewards_2d.mean(dim=-1, keepdim=True)
+        group_std = training_rewards_2d.std(dim=-1, keepdim=True)
         
         advantages = torch.where(
             group_std > 1e-6,
-            (rewards_2d - group_mean) / (group_std + 1e-8),
-            torch.zeros_like(rewards_2d)
+            (training_rewards_2d - group_mean) / (group_std + 1e-8),
+            torch.zeros_like(training_rewards_2d)
         )
 
         dead_groups = (group_std.squeeze(-1) <= 1e-6).sum().item()
@@ -544,9 +581,6 @@ class TrajectoryCollector:
         total_envs = len(env_modes)
         sys1_ratio = sys1_count / total_envs if total_envs > 0 else 0
 
-        # ==========================================
-        # 新增统计：Best@G, Mean@G 和 Trajectory 步数分布
-        # ==========================================
         best_at_g = 0.0
         mean_at_g = 0.0
         step_counts = {}
@@ -559,19 +593,17 @@ class TrajectoryCollector:
 
         if len(outcomes) == rewards_2d.numel():
             outcomes_2d = outcomes.reshape(-1, group_size)
-            # 只要组内有一个成功（>=1.0），就算作该组 Best 成功
             group_best = np.max(outcomes_2d >= 1.0, axis=1) 
             best_at_g = np.mean(group_best)
             mean_at_g = np.mean(outcomes_2d >= 1.0)
             
         if total_batch_list is not None:
             for i in range(len(total_batch_list)):
-                # 统计每条轨迹有效的 step 数量
                 valid_steps = sum(1 for step in total_batch_list[i] if step.get('active_masks', True))
                 step_counts[valid_steps] = step_counts.get(valid_steps, 0) + 1
 
         print("\n" + "="*50)
-        print("🎯 [GRPO Advantage & Reward Analytics]")
+        print("🎯 [GRPO Advantage & Reward Analytics (Including Format Penalties)]")
         print(f"🔹 Total Prompt Groups (Batches): {batch_size} | Group Size (G): {group_size}")
         print(f"🔹 Sys1/Sys2 Ratio: {sys1_ratio:.1%} / {1 - sys1_ratio:.1%}")
         print(f"🔹 Vanishing Ratio: {vanishing_ratio:.1%} ({dead_groups}/{batch_size} zero-variance groups)")
@@ -583,38 +615,47 @@ class TrajectoryCollector:
             print(f"   - {length} steps: {step_counts[length]} trajectories")
         print("-" * 50)
         
-        # ==========================================
-        # 修改输出：输出完整的 prompt Group，并列出组内所有轨迹的 Steps Reward 和 Outcome
-        # ==========================================
         print("\n📝 [Detailed Group & Trajectory Analytics]")
         for i in range(batch_size):
+            # 获取当前组的数据
             r_group = rewards_2d[i].cpu().numpy()
             a_group = advantages[i].cpu().numpy()
+            
+            # 处理惩罚项显示
+            if format_penalties is not None:
+                f_group = format_penalties.reshape(-1, group_size)[i]
+            else:
+                f_group = np.zeros(group_size)
+
             mode_idx = i * group_size
             mode = env_modes[mode_idx] if mode_idx < len(env_modes) else "Unknown"
             
             print(f"📦 [Prompt Group {i} | Mode: {mode}]")
-            print(f"   Group Rewards:    [{', '.join([f'{x:5.2f}' for x in r_group])}] (Mean: {group_mean[i].item():.2f}, Std: {group_std[i].item():.2f})")
+            # 打印包含惩罚项后的均值标准差，这才是 Advantage 的真实参考基准
+            print(f"   Group Mean Score: {group_mean[i].item():.2f} | Std: {group_std[i].item():.2f}")
             print(f"   Group Advantages: [{', '.join([f'{x:5.2f}' for x in a_group])}]")
+            
             if group_std[i].item() <= 1e-6:
                 print("   ⚠️ WARNING: Zero Variance! Advantages collapsed to 0.")
             
-            # 输出每个 Trajectory 的单步 Rewards 和结果 Outcome
             if total_batch_list is not None and outcomes_2d is not None:
                 for j in range(group_size):
                     global_idx = i * group_size + j
                     traj_steps = total_batch_list[global_idx]
                     
-                    # 提取每一步的 reward
                     step_rewards = [step.get('step_reward', 0.0) for step in traj_steps if step.get('active_masks', True)]
                     step_rew_str = ", ".join([f"{sr:5.2f}" for sr in step_rewards])
-                    outcome = outcomes_2d[i][j]
                     
-                    print(f"   -> Traj {j} ({len(step_rewards)} steps): Steps Reward [{step_rew_str}] | Outcome Reward: {outcome:.2f}")
+                    env_outcome = r_group[j]
+                    penalty = f_group[j]
+                    total_score = env_outcome + penalty # 计算最终总分
+                    
+                    # 详细打印每一项：环境分、惩罚分、总分
+                    print(f"   -> Traj {j} ({len(step_rewards)} steps): Steps[{step_rew_str}] | Env: {env_outcome:5.2f} | Penalty: {penalty:5.2f} | Total: {total_score:5.2f}")
 
             print("-" * 50)
 
-        # 保留原本针对成功/失败轨迹的抽样详细文本打印逻辑
+        # 抽样逻辑（保持原有）
         if total_batch_list is not None and total_success is not None:
             flat_advantages = advantages.flatten().cpu().numpy()
             flat_rewards = rewards.flatten().cpu().numpy()
@@ -652,12 +693,11 @@ class TrajectoryCollector:
                 mean_adv = np.mean(s["advs"]) if s["advs"] else 0.0
                 mean_step_rew = np.mean(s["step_rewards"]) if s["step_rewards"] else 0.0
                 print(f"🔹 {mode}:")
-                print(f"   - Total Trajectories: {len(s['traj_indices'])}")
                 print(f"   - Outcome: {s['success']} Success | {s['fail']} Fail")
                 print(f"   - Mean Advantage: {mean_adv:.4f}")
                 print(f"   - Mean Step Reward: {mean_step_rew:.4f}")
 
-            print("\n🎲 [Random Trajectory Samples (Filtered <|image_pad|>)]")
+            print("\n🎲 [Random Trajectory Samples]")
             import random
             for mode in stats.keys():
                 s = stats[mode]
@@ -667,7 +707,8 @@ class TrajectoryCollector:
                 rand_idx = random.choice(s["traj_indices"])
                 print(f"\n🟢 [Sample {mode} Trajectory | Index: {rand_idx}]")
                 print(f"   - Final Outcome: {'Success' if outcomes[rand_idx] >= 1.0 else 'Fail'}")
-                print(f"   - Episode Reward: {flat_rewards[rand_idx]:.4f} | Advantage: {flat_advantages[rand_idx]:.4f}")
+                print(f"   - Env Reward: {flat_rewards[rand_idx]:.4f} | Penalty: {format_penalties[rand_idx] if format_penalties is not None else 0.0:.2f}")
+                print(f"   - Advantage: {flat_advantages[rand_idx]:.4f}")
                 
                 traj_steps = total_batch_list[rand_idx]
                 for step_idx, step_data in enumerate(traj_steps):
