@@ -96,19 +96,22 @@ class GraphSearchEnv:
 
         check_match = re.search(r"check_nodes?\(\[?([\d,\s]+)\]?\)", current_action, re.IGNORECASE)
         final_match = re.search(r"(?:final|submit)\((.+?)\)", current_action, re.IGNORECASE)
+        
+        # 统计是否调用了工具
+        is_tool_call = 1 if check_match else 0
 
         if check_match:
             ids_str = check_match.group(1)
             target_ids = [int(x.strip()) for x in ids_str.split(',') if x.strip().isdigit()]
             
-            # 单次请求 ID 个数不得超过 5 个
             if len(target_ids) > 5:
                 target_ids = target_ids[:5] 
 
-            # 按批次累加惩罚
             self.check_batch_count += 1
-            if self.check_batch_count > 2:
-                reward += 0
+            
+            # 【修改点】：设置奖励封顶次数。只对前 3 次调用给与 +0.05 的探索奖励，后续不再给奖励，也不施加惩罚
+            if self.check_batch_count <= 3:
+                reward += 0.05
 
             obs_lines = []
             for tid in target_ids:
@@ -125,7 +128,7 @@ class GraphSearchEnv:
                     self.check_node_count += 1
                 else:
                     obs_lines.append(f"错误：节点 {tid} 不在当前雷达视野内。")
-                    reward += -0.1
+                    reward += -0.05
             
             obs = "\n\n".join(obs_lines)
 
@@ -138,12 +141,9 @@ class GraphSearchEnv:
                 reward = 1.0
                 obs = "预测正确！"
             else:
-                if self.check_node_count == 0:
-                    reward = -2.0  # 致命的盲目自信惩罚
-                    obs = "预测错误！"
-                else:
-                    reward = -1.0
-                    obs = "预测错误。"
+                # 【修改点 3】：彻底删除 -2.0 的盲猜惩罚，统一给 -1.0
+                reward = -1.0
+                obs = "预测错误。"
         else:
             obs = "无效动作格式，请检查拼写。"
             reward = -0.1
@@ -151,7 +151,7 @@ class GraphSearchEnv:
         failure_reason = "Success"
         if self.done and reward < 1.0:
             if final_match:
-                failure_reason = "Wrong_Answer_Blind" if self.check_node_count == 0 else "Wrong_Answer"
+                failure_reason = "Wrong_Answer"  # 删除了 Wrong_Answer_Blind
             else:
                 failure_reason = "Timeout"
         elif not self.done and self.step_count >= self.max_steps:
@@ -161,11 +161,13 @@ class GraphSearchEnv:
             self.is_won = (reward == 1.0)
             self.failure_reason = failure_reason
 
+        # 【修改点 4】：把 tool_calling 放进 info 里，解决 WandB 指标为 0 的问题
         info = {
             "step": self.step_count, 
             "won": (reward == 1.0), 
             "parsed_action": current_action, 
-            "failure_reason": failure_reason
+            "failure_reason": failure_reason,
+            "tool_calling": is_tool_call
         }
         return obs, img_ret, reward, self.done, info
 
