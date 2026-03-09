@@ -30,6 +30,8 @@ import os
 from PIL import Image
 import json
 import re 
+from datetime import datetime
+from agent_system.utils.smart_logger import SmartLogger
 
 class TrajectoryCollector:
     def __init__(self, config, tokenizer: PreTrainedTokenizer, processor=None):
@@ -220,6 +222,7 @@ class TrajectoryCollector:
             success: Dict[str, np.ndarray],
             traj_uid: np.ndarray,
             tool_callings: np.ndarray,
+            format_penalties: np.ndarray, # <--- 新增
             ) -> DataProto:
         batch_size = len(total_batch_list)
 
@@ -235,6 +238,7 @@ class TrajectoryCollector:
                     data['episode_rewards'] = episode_rewards[bs]
                     data['episode_lengths'] = episode_lengths[bs]
                     data['tool_callings'] = tool_callings[bs]
+                    data['format_penalty'] = float(format_penalties[bs]) # <--- 广播给所有 Step，防止 collate_fn 崩溃
                     
                     if 'step_reward' not in data:
                         data['step_reward'] = float(data.get('rewards', 0.0))
@@ -496,6 +500,7 @@ class TrajectoryCollector:
         total_success = []
         total_traj_uid = []
         total_tool_callings = []
+        total_format_penalties = []  # 增加存放 format_penalties
         try_count: int = 0
         max_try_count = self.config.algorithm.filter_groups.max_num_gen_batches
 
@@ -505,20 +510,25 @@ class TrajectoryCollector:
                 print(f"valid num={len(total_batch_list)} < target num={self.config.data.train_batch_size * self.config.env.rollout.n}. Keep generating... ({try_count}/{max_try_count})")
             try_count += 1
 
-            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings = self.vanilla_multi_turn_loop(
+            # 接收 format_penalties
+            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, format_penalties = self.vanilla_multi_turn_loop(
                 gen_batch=gen_batch,
                 actor_rollout_wg=actor_rollout_wg,
                 envs=envs,
             )
-            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings = filter_group_data(batch_list=batch_list, 
-                                                                                                episode_rewards=episode_rewards, 
-                                                                                                episode_lengths=episode_lengths, 
-                                                                                                success=success, 
-                                                                                                traj_uid=traj_uid, 
-                                                                                                tool_callings=tool_callings, 
-                                                                                                config=self.config,
-                                                                                                last_try=(try_count == max_try_count),
-                                                                                                )
+            
+            # [提醒] 如果 filter_group_data 会丢弃无效轨迹，请确保它同步接收和处理 format_penalties 参数，以防数据不对齐
+            batch_list, episode_rewards, episode_lengths, success, traj_uid, tool_callings, format_penalties = filter_group_data(
+                batch_list=batch_list, 
+                episode_rewards=episode_rewards, 
+                episode_lengths=episode_lengths, 
+                success=success, 
+                traj_uid=traj_uid, 
+                tool_callings=tool_callings, 
+                format_penalties=format_penalties,
+                config=self.config,
+                last_try=(try_count == max_try_count),
+            )
             
             total_batch_list += batch_list
             total_episode_rewards.append(episode_rewards)
@@ -526,14 +536,17 @@ class TrajectoryCollector:
             total_success.append(success)
             total_traj_uid.append(traj_uid)
             total_tool_callings.append(tool_callings)
+            total_format_penalties.append(format_penalties)
 
         total_episode_rewards = np.concatenate(total_episode_rewards, axis=0)
         total_episode_lengths = np.concatenate(total_episode_lengths, axis=0)
         total_success = {key: np.concatenate([success[key] for success in total_success], axis=0) for key in total_success[0].keys()}
         total_traj_uid = np.concatenate(total_traj_uid, axis=0)
         total_tool_callings = np.concatenate(total_tool_callings, axis=0)
+        total_format_penalties = np.concatenate(total_format_penalties, axis=0)
 
-        return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings
+        # 返回 7 个变量
+        return total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings, total_format_penalties
 
     def compute_and_log_grpo_advantages(
         self, 
@@ -542,7 +555,7 @@ class TrajectoryCollector:
         group_size: int, 
         total_batch_list: list = None, 
         total_success: dict = None,
-        format_penalties: np.ndarray = None  # 新增参数接收罚分
+        format_penalties: np.ndarray = None  # 接收罚分
     ):
         if rewards.dim() == 1:
             if rewards.shape[0] % group_size != 0:
@@ -724,6 +737,25 @@ class TrajectoryCollector:
                     print(f"   [Step Reward]: {step_reward}")
             print("="*50 + "\n")
 
+        # =====================================================================
+        # 新增：调用 SmartLogger 记录高度结构化的轨迹和 GRPO 打分信息
+        # =====================================================================
+        if total_batch_list is not None:
+            try:
+                logger = SmartLogger()
+                # verl 暂未在 Rollout Worker 显式暴露 global_step，可用 uuid 代替或暂存 0 待之后 Metrics 更新时对齐
+                dummy_step = int(datetime.now().timestamp()) 
+                logger.log_rollout_data(
+                    step_idx=dummy_step,
+                    total_batch_list=total_batch_list,
+                    group_size=group_size,
+                    rewards=rewards.cpu().numpy(),
+                    format_penalties=format_penalties,
+                    is_agent=True
+                )
+            except Exception as e:
+                print(f"[SmartLogger] Warning: Failed to log rollout data. {e}")
+
         return advantages
 
     def multi_turn_loop(
@@ -737,10 +769,11 @@ class TrajectoryCollector:
             gen_batch = gen_batch.repeat(repeat_times=self.config.env.rollout.n, interleave=True)
             
         if self.config.algorithm.filter_groups.enable and is_train:
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+            # 接收 format_penalties
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings, total_format_penalties = \
                 self.dynamic_multi_turn_loop(gen_batch=gen_batch, actor_rollout_wg=actor_rollout_wg, envs=envs)
         else:
-            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, totoal_tool_callings = \
+            total_batch_list, total_episode_rewards, total_episode_lengths, total_success, total_traj_uid, total_tool_callings, total_format_penalties = \
                 self.vanilla_multi_turn_loop(gen_batch=gen_batch, actor_rollout_wg=actor_rollout_wg, envs=envs)
         
         assert len(total_batch_list) == len(total_episode_rewards)
@@ -757,18 +790,14 @@ class TrajectoryCollector:
         if is_train and group_size > 1:
             outcomes = np.array(total_success.get('success_rate', []))
             
+            # 合并惩罚项以同步逻辑：环境分 + 格式罚分
+            real_rewards = total_episode_rewards + total_format_penalties
+            
             if len(outcomes) == len(total_episode_rewards):
                 for i in range(0, len(outcomes), group_size):
                     group_slice = outcomes[i : i + group_size]
                     
-                    # if np.all(group_slice == 0) or np.all(group_slice == 1):
-                    #     total_episode_rewards[i : i + group_size] = 0.0
-                    #     for j in range(i, i + group_size):
-                    #         for step_data in total_batch_list[j]:
-                    #             step_data['step_reward'] = 0.0
-                    #             step_data['is_filtered'] = True 
-                    
-                    group_outcomes = total_episode_rewards[i : i + group_size]
+                    group_outcomes = real_rewards[i : i + group_size]
                     mean = np.mean(group_outcomes)
                     std = np.std(group_outcomes)
                     if std > 1e-6:
@@ -794,23 +823,27 @@ class TrajectoryCollector:
                 
                 rewards_tensor = torch.tensor(total_episode_rewards, dtype=torch.float32)
                 
+                # 补充 format_penalties 参数
                 self.compute_and_log_grpo_advantages(
                     rewards_tensor, 
                     env_modes, 
                     group_size, 
                     total_batch_list=total_batch_list, 
-                    total_success=total_success
+                    total_success=total_success,
+                    format_penalties=total_format_penalties 
                 )
         except Exception as e:
             print(f"[Warning] Failed to compute and log GRPO advantages: {e}")
 
+        # 修复传参笔误：totoal_tool_callings -> total_tool_callings
         gen_batch_output: DataProto = self.gather_rollout_data(
             total_batch_list=total_batch_list,
             episode_rewards=total_episode_rewards,
             episode_lengths=total_episode_lengths,
             success=total_success,
             traj_uid=total_traj_uid,
-            tool_callings=totoal_tool_callings,
+            tool_callings=total_tool_callings,
+            format_penalties=total_format_penalties
         )
         
         REMOVE_KEYS = ['pixel_values', 'image_grid_thw'] 

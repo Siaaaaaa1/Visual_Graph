@@ -63,6 +63,7 @@ from verl.workers.rollout.async_server import AsyncLLMServerManager
 from gigpo import core_gigpo
 
 from agent_system.multi_turn_rollout import TrajectoryCollector, adjust_batch
+from agent_system.utils.smart_logger import SmartLogger
 
 WorkerType = Type[Worker]
 
@@ -1314,6 +1315,22 @@ class RayPPOTrainer:
                 
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
+
+                # --- 新增：SmartLogger 核心 RL 指标收集与自动诊断预警 ---
+                try:
+                    smart_logger = SmartLogger()
+                    smart_metrics = {
+                        "actor/pg_loss": metrics.get("actor/pg_loss", 0.0),
+                        "actor/entropy_loss": metrics.get("actor/entropy_loss", 0.0),
+                        "actor/ppo_kl": metrics.get("actor/ppo_kl", 0.0),
+                        "actor/grad_norm": metrics.get("actor/grad_norm", 0.0),
+                        "critic/score/mean": metrics.get("critic/score/mean", 0.0),
+                        "response_length/mean": metrics.get("response_length/mean", 0.0)
+                    }
+                    smart_logger.log_rl_metrics_and_diagnose(step_idx=self.global_steps, metrics=smart_metrics)
+                except Exception as e:
+                    print(f"[SmartLogger] Error in Trainer diagnostics: {e}")
+                # --------------------------------------------------------
 
                 logger.log(data=metrics, step=self.global_steps)
 

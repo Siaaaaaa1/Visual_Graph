@@ -14,7 +14,7 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
-
+import uuid
 import os
 import sys  # Added for flush
 import hydra
@@ -32,14 +32,28 @@ def main(config):
 
 def run_ppo(config) -> None:
     print(f"[DEBUG] Starting run_ppo...", flush=True)
+    
+    # =====================================================================
+    # 新增：初始化 SmartLogger 的全局 RUN_ID，确保 Ray Workers 写同一个 JSON
+    # =====================================================================
+    run_id = str(uuid.uuid4())[:4]
+    os.environ["SMART_LOGGER_RUN_ID"] = run_id
+    print(f"[DEBUG] SmartLogger globally initialized with RUN_ID: {run_id}", flush=True)
+    # =====================================================================
+
     # Check if Ray is not initialized
     if not ray.is_initialized():
         print(f"[DEBUG] Ray not initialized. Preparing to init...", flush=True)
         # Initialize Ray with a local cluster configuration
         default_runtime_env = get_ppo_ray_runtime_env()
         ray_init_kwargs = config.get("ray_init", {})
+        
+        # 确保将环境变量注入 Ray 集群
         runtime_env_kwargs = ray_init_kwargs.get("runtime_env", {})
-
+        env_vars = runtime_env_kwargs.get("env_vars", {})
+        env_vars["SMART_LOGGER_RUN_ID"] = run_id
+        runtime_env_kwargs["env_vars"] = env_vars
+        
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
         ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         print(f"ray init kwargs: {ray_init_kwargs}", flush=True)
