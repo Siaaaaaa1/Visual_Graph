@@ -14,52 +14,50 @@ from tqdm.asyncio import tqdm
 from concurrent.futures import ThreadPoolExecutor
 import re
 import random
+from dotenv import load_dotenv
 
-# ================= 路径动态挂载与组件导入 =================
-# 将项目根目录加入环境变量，确保能顺利导入 agent_system 下的所有模块
+# ================= 1. 环境与配置加载 =================
+load_dotenv()
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+API_URL = f"{DASHSCOPE_BASE_URL}/chat/completions"
+
+# ================= 2. 路径挂载与组件导入 =================
 sys.path.insert(0, os.path.abspath("."))
 
-# 根据真实目录结构导入组件
-from agent_system.memory import FullSequenceSearchMemory
+# 导入你提供的组件
 from agent_system.environments.env_package.graph_search.envs import GraphSearchEnv
 from agent_system.environments.env_package.graph_search.graph_visualizer import GraphVisualizer
+# 从 env_manager 中获取最新的系统提示词
+from agent_system.environments.env_manager_graph_search import V_GRAPH_AGENT_INSTRUCTION
 
-# 导入 RL 环境管理器中一模一样的 Prompt 模板
-from agent_system.environments.env_manager_graph_search import (
-    SYSTEM1_TASK_INSTRUCTION, SYSTEM1_FEW_SHOT,
-    SYSTEM2_TASK_INSTRUCTION, SYSTEM2_FEW_SHOT,
-    TEMPLATE_NO_HIS, TEMPLATE_WITH_HIS
-)
-
-# ================= 配置与日志 =================
+# ================= 3. 参数解析与日志 =================
 parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str, required=True, choices=["cora", "pubmed", "arxiv"])
 parser.add_argument("--num_tasks", type=int, default=100000)
 parser.add_argument("--dataset_dir", type=str, default="datasets")
-parser.add_argument("--target_successes", type=int, default=1, help="每个样本需要收集的成功轨迹数")
 args = parser.parse_args()
+
+# 蒸馏门控常量
+INITIAL_MAX_ATTEMPTS = 5
+EXTENDED_MAX_ATTEMPTS = 15
+TARGET_SUCCESS_COUNT = 3
 
 os.makedirs("distill", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
-        logging.FileHandler(f"distill/distill_{args.dataset}.log", mode='a'),
+        logging.FileHandler(f"distill/distill_vgraph_{args.dataset}.log", mode='a'),
         logging.StreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger(__name__)
 
-API_URL = "http://localhost:8080/v1/chat/completions"
-MAX_CONCURRENT_REQUESTS = 32   # GPU 并发数
-MAX_RETRIES = 10               # 最大重试次数
-HISTORY_LENGTH = 10            # 记忆追溯长度
+# 并发控制：针对 qwen-vl-max 建议保持在 8-10 左右
+MAX_CONCURRENT_REQUESTS = 8   
 
-# ================= 预编译正则 =================
-SUMMARY_PATTERN = re.compile(r"<summary>(.*?)</summary>", re.DOTALL | re.IGNORECASE)
-ACTION_PATTERN = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
-
-# ================= CPU 密集型辅助函数 =================
+# ================= 4. 辅助函数 =================
 def ndarray_to_bytes(img_array: np.ndarray) -> bytes:
     img = Image.fromarray(img_array)
     buf = BytesIO()
@@ -69,7 +67,10 @@ def ndarray_to_bytes(img_array: np.ndarray) -> bytes:
 def img_to_b64(img_array):
     return base64.b64encode(ndarray_to_bytes(img_array)).decode("utf-8")
 
-# ================= 数据预加载与测试集过滤 =================
+# 正则匹配
+ACTION_PATTERN = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
+
+# ================= 5. 数据预加载 =================
 def prepare_shared_assets(dataset_name, dataset_dir):
     logger.info(f"预加载数据集资产: {dataset_name}")
     
@@ -79,9 +80,7 @@ def prepare_shared_assets(dataset_name, dataset_dir):
         test_df = pd.read_parquet(test_parquet_path)
         if 'center_id' in test_df.columns:
             test_ids = set(test_df['center_id'].astype(int).tolist())
-        logger.info(f"🛡️ 成功加载测试集名单，共计 {len(test_ids)} 个测试节点将在蒸馏中被强行过滤！")
-    else:
-        logger.warning(f"⚠️ 未找到测试集文件 {test_parquet_path}，无法执行测试集屏蔽！")
+        logger.info(f"🛡️ 过滤测试集节点数: {len(test_ids)}")
 
     json_path = os.path.join(dataset_dir, f"{dataset_name}.json")
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -90,187 +89,125 @@ def prepare_shared_assets(dataset_name, dataset_dir):
     all_tasks = []
     for node in raw.get("nodes", []):
         nid = int(node["id"])
-        
-        if nid in test_ids:
-            continue
-            
+        if nid in test_ids: continue
         ans = node.get("label") or node.get("proxy_info", {}).get("top1") or "Unknown"
         all_tasks.append({"center_id": nid, "answer": ans})
         
-    logger.info(f"✅ 过滤后剩余可用节点数 (非Test集): {len(all_tasks)}")
-    
     text_path = os.path.join(dataset_dir, f"{dataset_name}_text.json")
-    if not os.path.exists(text_path):
-        raise FileNotFoundError(f"找不到节点文本文件：{text_path}")
-        
     with open(text_path, 'r', encoding='utf-8') as f:
         text_db = json.load(f)
 
+    # 初始化 Visualizer 获取共享数据
     g_data, r_adj, c_map = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)
     temp_viz = GraphVisualizer(dataset_name=dataset_name, dataset_dir=dataset_dir, shared_data=(g_data, r_adj, c_map, None))
     shared_payload = (g_data, r_adj, c_map, temp_viz.feat_matrix)
     
     return all_tasks, text_db, shared_payload
 
-# ================= 异步 API 请求 =================
+# ================= 6. 异步 API 请求 (指定使用 qwen-vl-max) =================
 async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: float, sem: asyncio.Semaphore):
+    headers = {
+        "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
+        "Content-Type": "application/json"
+    }
     payload = {
-        "model": "qwen3-vl-teacher",
+        "model": "qwen-vl-max",
         "messages": msgs,
         "temperature": temp,
         "stop": ["</action>"]
     }
     async with sem:
-        timeout = aiohttp.ClientTimeout(total=3600, connect=300, sock_read=3600)
-        async with session.post(API_URL, json=payload, timeout=timeout) as response:
+        timeout = aiohttp.ClientTimeout(total=600, connect=60, sock_read=300)
+        async with session.post(API_URL, json=payload, headers=headers, timeout=timeout) as response:
             if response.status != 200:
                 error_text = await response.text()
                 raise RuntimeError(f"HTTP {response.status}: {error_text}")
-                
             data = await response.json()
             return data["choices"][0]["message"]["content"] + "</action>"
 
-# ================= 单个任务并发执行逻辑 (完全复刻 RL Env Manager) =================
+# ================= 7. 核心任务蒸馏逻辑 =================
 async def run_task_async(task, text_db, shared_payload, session, sem, executor):
     tid = task["center_id"]
-    successful_trajectories = []
+    collected_trajectories = []
     loop = asyncio.get_running_loop()
     
-    for needed_idx in range(args.target_successes):
-        success = False
-        
-        for attempt in range(MAX_RETRIES):
-            current_temp = min(0.6 + (attempt * 0.04), 1.0)
-            tau_val = random.choice([0.2, 0.4, 0.6])
-            
-            # 初始化 Memory (每次尝试均重置)
-            memory = FullSequenceSearchMemory()
-            memory.reset(batch_size=1)
-            
-            env = await loop.run_in_executor(
-                executor, 
-                lambda: GraphSearchEnv(
-                    max_steps=10, node_text_db=text_db, dataset_name=args.dataset,
-                    dataset_dir=args.dataset_dir, shared_graph_data=shared_payload, tau=tau_val
-                )
-            )
-            obs_text, obs_img, info = await loop.run_in_executor(executor, env.reset, task)
-            
-            # 保存初始状态给 Prompt 模板用
-            initial_state = obs_text 
-            raw_traj = []
-            
-            step_count, process_rewards, final_reward = 0, 0.0, 0.0
-            done = False
-            api_error = False
-            
-            while not done:
-                # 1. 判断并获取对应的任务指令和 few shot
-                mode = info["mode"]
-                task_inst = SYSTEM1_TASK_INSTRUCTION if mode == "System1" else SYSTEM2_TASK_INSTRUCTION
-                few_shot = SYSTEM1_FEW_SHOT if mode == "System1" else SYSTEM2_FEW_SHOT
-                
-                # 2. 完全模拟 RL 的 Prompt 构建逻辑
-                if step_count == 0:
-                    prompt_text = TEMPLATE_NO_HIS.format(
-                        task_instruction=task_inst,
-                        few_shot=few_shot,
-                        initial_state=initial_state
-                    )
-                else:
-                    memory_ctx, _ = memory.fetch(
-                        HISTORY_LENGTH,
-                        obs_key="information",
-                        action_key="search",
-                        summary_key="summary"
-                    )
-                    prompt_text = TEMPLATE_WITH_HIS.format(
-                        task_instruction=task_inst,
-                        few_shot=few_shot,
-                        initial_state=initial_state,
-                        memory_context=memory_ctx[0],
-                        step_count=step_count + 1
-                    )
-                
-                # 3. 构造真正的 API Message
-                # 此处 user_content 仅包含本轮拼接好的大段文本（内含纯文本历史记录）以及唯一的一张最新图
-                user_content = [{"type": "text", "text": prompt_text}]
-                
-                if obs_img is not None:
-                    b64_img = await loop.run_in_executor(executor, img_to_b64, obs_img)
-                    user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
-
-                # API 调用永远是单轮请求，彻底斩断历史图片堆积导致的 HTTP 400 OOM 风险
-                api_msgs = [{"role": "user", "content": user_content}]
-                
-                try:
-                    ans_text = await fetch_completion(session, api_msgs, current_temp, sem)
-                except Exception as e:
-                    err_msg = repr(e)
-                    logger.error(f"Task {tid} API Error on attempt {attempt+1}: {err_msg}")
-                    api_error = True
-                    break
-
-                # 4. 解析模型的返回内容
-                s_match = SUMMARY_PATTERN.search(ans_text)
-                summary = s_match.group(1).strip() if s_match else "No summary provided."
-                
-                action_match = ACTION_PATTERN.search(ans_text)
-                action_str = action_match.group(1).strip() if action_match else "ERROR"
-                
-                # 5. 环境前进一步，获取反馈
-                next_obs_text, next_obs_img, r, done, s_info = await loop.run_in_executor(executor, env.step, action_str)
-                
-                # 6. 将操作存入 Memory，供下一轮使用
-                memory.store({
-                    "search": [action_str],
-                    "information": [next_obs_text],
-                    "summary": [summary]
-                })
-                
-                # 7. 存入专门供 SFT 使用的 Trajectory (单轮格式，文本已包含完整上下文)
-                raw_traj.append({
-                    "messages": [{"role": "user", "content": user_content}],
-                    "target": {"role": "assistant", "content": ans_text}
-                })
-                
-                # 更新循环变量
-                obs_text = next_obs_text
-                obs_img = next_obs_img
-                step_count += 1
-                if 0 < r < 1.0: process_rewards += r
-                if done: final_reward = r
-
-            if api_error:
-                await asyncio.sleep(2)
-                continue
-
-            # ================= 质量门控 =================
-            is_valid = True
-            if final_reward < 1.0 or step_count > 8: is_valid = False
-            if info["mode"] == "System2" and process_rewards <= 0: is_valid = False
-            
-            if is_valid:
-                successful_trajectories.append({
-                    "task_id": tid, "mode": info["mode"], "steps": step_count, "traj": raw_traj
-                })
-                success = True
-                break
-                
-        if not success:
-            logger.warning(f"Task {tid} 连续 {MAX_RETRIES} 次尝试失败，放弃该样本。")
+    # 逻辑：前5次只要有1次成功，就目标凑齐3条，上限15次
+    for attempt_idx in range(1, EXTENDED_MAX_ATTEMPTS + 1):
+        # 门控检查：如果前5次结束了且一条成功的都没有，直接退出
+        if attempt_idx > INITIAL_MAX_ATTEMPTS and len(collected_trajectories) == 0:
+            break
+        # 目标达成检查
+        if len(collected_trajectories) >= TARGET_SUCCESS_COUNT:
             break
 
-    if len(successful_trajectories) == args.target_successes:
-        return successful_trajectories
-    return None
+        # 动态调节温度增加探索性
+        current_temp = 0.6 if attempt_idx <= 5 else 0.8
+        
+        # 初始化环境
+        env = await loop.run_in_executor(
+            executor, 
+            lambda: GraphSearchEnv(
+                max_steps=10, node_text_db=text_db, dataset_name=args.dataset,
+                dataset_dir=args.dataset_dir, shared_graph_data=shared_payload
+            )
+        )
+        obs_text, obs_img, info = await loop.run_in_executor(executor, env.reset, task)
+        
+        messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}] # 使用最新的 Instruction
+        raw_traj_steps = []
+        done = False
+        api_error = False
+        final_reward = 0.0
+        
+        while not done:
+            user_content = [{"type": "text", "text": obs_text}]
+            if obs_img is not None:
+                b64_img = await loop.run_in_executor(executor, img_to_b64, obs_img)
+                user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
+            
+            messages.append({"role": "user", "content": user_content})
+            
+            try:
+                ans_text = await fetch_completion(session, messages, current_temp, sem)
+            except Exception as e:
+                logger.error(f"Task {tid} API Error: {repr(e)}")
+                api_error = True
+                break
 
-# ================= 异步主函数 =================
+            messages.append({"role": "assistant", "content": ans_text})
+            
+            # 解析 Action 并推进行进
+            action_match = ACTION_PATTERN.search(ans_text)
+            action_str = action_match.group(1).strip() if action_match else "ERROR"
+            
+            next_obs_text, next_obs_img, r, done, s_info = await loop.run_in_executor(executor, env.step, action_str)
+            
+            raw_traj_steps.append({
+                "user": user_content,
+                "assistant": ans_text
+            })
+            
+            obs_text, obs_img = next_obs_text, next_obs_img
+            if done: final_reward = r
+
+        if not api_error and final_reward >= 1.0: # 环境中 reward=1.0 代表预测正确
+            collected_trajectories.append({
+                "task_id": tid,
+                "traj": raw_traj_steps
+            })
+
+    return collected_trajectories if collected_trajectories else None
+
+# ================= 8. 异步主函数 =================
 async def main_async():
+    if not DASHSCOPE_API_KEY:
+        logger.error("DASHSCOPE_API_KEY 缺失！")
+        return
+
     all_tasks, text_db, shared_payload = prepare_shared_assets(args.dataset, args.dataset_dir)
     
-    stats_path = f"distill/{args.dataset}_stats.jsonl"
-    training_data_path = f"distill/{args.dataset}_training.jsonl"
+    stats_path = f"distill/{args.dataset}_vgraph_stats.jsonl"
+    training_data_path = f"distill/{args.dataset}_vgraph_training.jsonl"
     
     completed_tids = set()
     if os.path.exists(stats_path):
@@ -280,76 +217,61 @@ async def main_async():
                     try:
                         data = json.loads(line)
                         completed_tids.add(data["tid"])
-                    except Exception:
-                        pass
+                    except: pass
                         
-    logger.info(f"🔄 检测到本地历史进度，跳过已完成的任务数: {len(completed_tids)}")
-    
     pending_tasks = [t for t in all_tasks if t["center_id"] not in completed_tids]
     random.shuffle(pending_tasks)
+    tasks_to_run = pending_tasks[:args.num_tasks]
     
-    tasks_to_run = pending_tasks[:max(0, args.num_tasks - len(completed_tids))]
+    logger.info(f"🚀 启动蒸馏。待执行任务数: {len(tasks_to_run)}")
     
-    if not tasks_to_run:
-        logger.info("🎉 所有指定数量的任务已全部完成，无需继续执行！")
-    else:
-        logger.info(f"🚀 本次实际启动蒸馏任务数: {len(tasks_to_run)}")
-        
-        connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
-        sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-        executor = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS)
-        
-        saved_count = 0
-        
-        try:
-            async with aiohttp.ClientSession(connector=connector) as session:
-                tasks_coroutines = [
-                    run_task_async(t, text_db, shared_payload, session, sem, executor) 
-                    for t in tasks_to_run
-                ]
-                
-                for coro in tqdm.as_completed(tasks_coroutines, total=len(tasks_to_run), desc=f"蒸馏 {args.dataset}"):
-                    trajectories = await coro
-                    if trajectories:
-                        with open(stats_path, 'a', encoding='utf-8') as f_stats, \
-                             open(training_data_path, 'a', encoding='utf-8') as f_data:
-                             
-                            for res in trajectories:
-                                stats_record = {"tid": res["task_id"], "steps": res["steps"], "mode": res["mode"]}
-                                f_stats.write(json.dumps(stats_record) + "\n")
-                                
-                                t_seq = res["traj"]
-                                # 写入 SFT 格式
-                                for step_data in t_seq:
-                                    train_record = {
-                                        "dataset": args.dataset,
-                                        "messages": step_data["messages"] + [step_data["target"]]
-                                    }
-                                    f_data.write(json.dumps(train_record) + "\n")
-                                
-                                saved_count += 1
-        except KeyboardInterrupt:
-            logger.info("\n🛑 检测到键盘中断 (Ctrl+C)，正在安全停止并进入 Parquet 转换阶段...")
-        finally:
-            executor.shutdown(wait=True)
-            print(f"\n[SUCCESS] 蒸馏流程结束! 本次新增成功轨迹数: {saved_count} (数据已写入 jsonl)")
+    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
+    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    executor = ThreadPoolExecutor(max_workers=32)
+    
+    saved_traj_count = 0
+    try:
+        async with aiohttp.ClientSession(connector=connector) as session:
+            tasks_coroutines = [
+                run_task_async(t, text_db, shared_payload, session, sem, executor) 
+                for t in tasks_to_run
+            ]
+            
+            for coro in tqdm.as_completed(tasks_coroutines, total=len(tasks_to_run), desc="蒸馏进度"):
+                trajs = await coro
+                if trajs:
+                    with open(stats_path, 'a', encoding='utf-8') as f_stats, \
+                         open(training_data_path, 'a', encoding='utf-8') as f_data:
+                        
+                        f_stats.write(json.dumps({"tid": trajs[0]["task_id"], "count": len(trajs)}) + "\n")
+                        
+                        for entry in trajs:
+                            # 构造符合 SFT 格式的消息流
+                            sft_messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
+                            for step in entry["traj"]:
+                                sft_messages.append({"role": "user", "content": step["user"]})
+                                sft_messages.append({"role": "assistant", "content": step["assistant"]})
+                            
+                            f_data.write(json.dumps({
+                                "dataset": args.dataset,
+                                "messages": sft_messages
+                            }, ensure_ascii=False) + "\n")
+                            saved_traj_count += 1
+                            
+    except KeyboardInterrupt:
+        logger.info("用户中断执行。")
+    finally:
+        executor.shutdown(wait=True)
+        logger.info(f"蒸馏结束。共保存成功轨迹数: {saved_traj_count}")
 
-    # ================= 最终步骤：自动生成 Parquet 供训练使用 =================
-    logger.info("正在将完整的 JSONL 数据转换为 Parquet 格式以供后续 SFT 训练...")
+    # 自动转换 Parquet
     if os.path.exists(training_data_path):
         try:
             df = pd.read_json(training_data_path, lines=True)
-            parquet_path = f"distill/{args.dataset}_training.parquet"
-            df.to_parquet(parquet_path, index=False)
-            logger.info(f"✅ 成功生成 Parquet 训练集: {parquet_path}，共包含 {len(df)} 条对话样本！")
-            logger.info(f"👉 现在可以直接运行: bash distill/run_sft_training.sh 8 distill/output_dir")
+            df.to_parquet(f"distill/{args.dataset}_vgraph_training.parquet", index=False)
+            logger.info("✅ 训练集 Parquet 已生成。")
         except Exception as e:
-            logger.error(f"❌ JSONL 转换 Parquet 失败: {e}")
-    else:
-        logger.warning(f"⚠️ 未找到数据文件 {training_data_path}，跳过 Parquet 转换。")
+            logger.error(f"❌ Parquet 转换失败: {e}")
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main_async())
-    except KeyboardInterrupt:
-        pass
+    asyncio.run(main_async())
