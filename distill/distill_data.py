@@ -108,7 +108,7 @@ def _is_valid_step(assistant_text: str) -> bool:
 
 # ================= 5. 数据预加载 =================
 def prepare_shared_assets(dataset_name, dataset_dir):
-    logger.info(f"预加载数据集资产: {dataset_name}")
+    logger.info(f"Loading shared assets for dataset: {dataset_name}")
     
     test_parquet_path = os.path.join(dataset_dir, f"{dataset_name}_test_slim.parquet")
     test_ids = set()
@@ -116,7 +116,7 @@ def prepare_shared_assets(dataset_name, dataset_dir):
         test_df = pd.read_parquet(test_parquet_path)
         if 'center_id' in test_df.columns:
             test_ids = set(test_df['center_id'].astype(int).tolist())
-        logger.info(f"🛡️ 过滤测试集节点数: {len(test_ids)}")
+        logger.info(f"Test-set nodes excluded: {len(test_ids)}")
 
     json_path = os.path.join(dataset_dir, f"{dataset_name}.json")
     with open(json_path, 'r', encoding='utf-8') as f:
@@ -208,7 +208,7 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
         current_temp = 0.6 if attempt_idx <= 5 else 0.8
 
         # 初始化环境
-        logger.debug(f"[Task {tid}] attempt={attempt_idx} — 创建 env...")
+        logger.debug(f"[Task {tid}] attempt={attempt_idx} — creating env...")
         env = await loop.run_in_executor(
             executor,
             lambda: GraphSearchEnv(
@@ -216,9 +216,9 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
                 dataset_dir=args.dataset_dir, shared_graph_data=shared_payload
             )
         )
-        logger.debug(f"[Task {tid}] attempt={attempt_idx} — env.reset (渲染图片)...")
+        logger.debug(f"[Task {tid}] attempt={attempt_idx} — env.reset (rendering graph)...")
         obs_text, obs_img, info = await loop.run_in_executor(executor, env.reset, task)
-        logger.debug(f"[Task {tid}] attempt={attempt_idx} — env.reset 完成，开始对话循环")
+        logger.debug(f"[Task {tid}] attempt={attempt_idx} — env.reset done, starting dialogue loop")
 
         messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
         raw_traj_steps = []
@@ -226,21 +226,25 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
         api_error = False
         final_reward = 0.0
         step_idx = 0
+        # Cache the initial image (same every step — only encode once)
+        cached_b64_img = None
+        if obs_img is not None:
+            cached_b64_img = await loop.run_in_executor(executor, img_to_b64, obs_img)
 
         while not done:
             user_content = [{"type": "text", "text": obs_text}]
-            if obs_img is not None:
-                b64_img = await loop.run_in_executor(executor, img_to_b64, obs_img)
-                user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
+            # Only attach image in the first round; subsequent rounds are text-only
+            if step_idx == 0 and cached_b64_img is not None:
+                user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{cached_b64_img}"}})
 
             messages.append({"role": "user", "content": user_content})
 
-            logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — → API请求中 (msgs={len(messages)}条)...")
+            logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — sending request (msgs={len(messages)})...")
             try:
                 ans_text = await fetch_completion(session, messages, current_temp, sem)
                 # 打印 API 返回内容（截取前 300 字符，避免 base64 图片膨胀日志）
                 preview = ans_text.replace("\n", " ")[:300]
-                logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — ← API返回 ({len(ans_text)}字符): {preview}")
+                logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — received ({len(ans_text)} chars): {preview}")
             except Exception as e:
                 logger.error(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — API ERROR: {repr(e)}")
                 api_error = True
@@ -255,8 +259,10 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
 
             next_obs_text, next_obs_img, r, done, s_info = await loop.run_in_executor(executor, env.step, action_str)
 
+            # Save user content without image_url (image stored once at traj level)
+            user_text_only = [p for p in user_content if p.get("type") != "image_url"]
             raw_traj_steps.append({
-                "user": user_content,
+                "user": user_text_only,
                 "assistant": ans_text
             })
 
@@ -271,13 +277,14 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
             bad_steps = [i for i, s in enumerate(raw_traj_steps)
                          if not _is_valid_step(s.get("assistant", ""))]
             if bad_steps:
-                logger.debug(f"[Task {tid}] attempt={attempt_idx} 格式不合法（步骤 {bad_steps} 含中文标点或缺 think），丢弃本次轨迹")
+                logger.debug(f"[Task {tid}] attempt={attempt_idx} invalid format (steps {bad_steps} contain Chinese punctuation or missing <thinking>), discarding trajectory")
                 last_failure_type = "invalid_format"
             else:
                 collected_trajectories.append({
                     "task_id": tid,
                     "node_class": task["answer"],
                     "first_success_attempt": attempt_idx,
+                    "image_b64": cached_b64_img,  # shared across all steps
                     "traj": raw_traj_steps
                 })
 
@@ -317,7 +324,7 @@ def _save_sample_images(training_data_path: str, dataset_name: str, n: int = 5):
     - 由于每步图片完全相同（雷达图不更新），可通过目视确认一致性
     """
     if not os.path.exists(training_data_path):
-        logger.warning("_save_sample_images: 训练文件不存在，跳过。")
+        logger.warning("_save_sample_images: training file not found, skipping.")
         return
 
     sample_dir = os.path.join("distill", f"{dataset_name}_samples")
@@ -328,41 +335,29 @@ def _save_sample_images(training_data_path: str, dataset_name: str, n: int = 5):
             all_entries = [json.loads(line) for line in f if line.strip()]
 
         if not all_entries:
-            logger.warning("_save_sample_images: 训练文件为空，跳过。")
+            logger.warning("_save_sample_images: training file is empty, skipping.")
             return
 
         samples = random.sample(all_entries, min(n, len(all_entries)))
-        logger.info(f"💾 保存 {len(samples)} 条随机样本图片 → {sample_dir}/")
+        logger.info(f"Saving {len(samples)} random sample images -> {sample_dir}/")
 
         for traj_idx, entry in enumerate(samples):
             traj_dir = os.path.join(sample_dir, f"traj_{traj_idx:02d}")
             os.makedirs(traj_dir, exist_ok=True)
 
-            messages = entry.get("messages", [])
-            step_idx = 0
-            for msg in messages:
-                if msg["role"] != "user":
-                    continue
-                content = msg["content"]
-                if not isinstance(content, list):
-                    step_idx += 1
-                    continue
-                for part in content:
-                    if part.get("type") == "image_url":
-                        url = part["image_url"]["url"]
-                        b64_data = url.split(",", 1)[1]
-                        img_bytes = base64.b64decode(b64_data)
-                        img = Image.open(BytesIO(img_bytes))
-                        save_path = os.path.join(traj_dir, f"step_{step_idx:02d}.png")
-                        img.save(save_path)
-                        break
-                step_idx += 1
+            # New format: single image stored in top-level "images" list
+            images_list = entry.get("images", [])
+            if images_list:
+                img_bytes = base64.b64decode(images_list[0])
+                img = Image.open(BytesIO(img_bytes))
+                save_path = os.path.join(traj_dir, "graph_view.png")
+                img.save(save_path)
 
-            saved_steps = len(list(os.scandir(traj_dir)))
-            logger.info(f"  traj_{traj_idx:02d}: 保存了 {saved_steps} 张图片（dataset={entry.get('dataset', '?')}）")
+            saved_count = len(list(os.scandir(traj_dir)))
+            logger.info(f"  traj_{traj_idx:02d}: saved {saved_count} image(s) (dataset={entry.get('dataset', '?')})")
 
     except Exception as e:
-        logger.error(f"_save_sample_images 失败: {e}")
+        logger.error(f"_save_sample_images failed: {e}")
 
 
 # ================= 9. 异步主函数 =================
@@ -378,32 +373,32 @@ async def _check_api_connectivity():
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(API_URL, json=test_payload, headers=headers, timeout=timeout) as resp:
-                if resp.status in (200, 400):  # 400 也说明服务可达（参数问题）
-                    logger.info(f"✅ DashScope API 连通性验证通过 (HTTP {resp.status})")
+                if resp.status in (200, 400):  # 400 also means service is reachable
+                    logger.info(f"DashScope API connectivity OK (HTTP {resp.status})")
                     return True
                 text = await resp.text()
-                logger.error(f"❌ DashScope API 返回异常: HTTP {resp.status} — {text[:200]}")
+                logger.error(f"DashScope API unexpected response: HTTP {resp.status} — {text[:200]}")
                 return False
     except asyncio.TimeoutError:
-        logger.error("❌ DashScope API 连接超时（10s），请检查网络或 DASHSCOPE_BASE_URL 是否正确")
+        logger.error("DashScope API connection timeout (10s). Check network or DASHSCOPE_BASE_URL.")
         return False
     except Exception as e:
-        logger.error(f"❌ DashScope API 连通性检查失败: {repr(e)}")
+        logger.error(f"DashScope API connectivity check failed: {repr(e)}")
         return False
 
 
 async def main_async():
     if not DASHSCOPE_API_KEY:
-        logger.error("DASHSCOPE_API_KEY 缺失！")
+        logger.error("DASHSCOPE_API_KEY is missing!")
         return
 
-    # ── 1. API 连通性检查 ──
-    logger.info(f"🔌 验证 DashScope API ({API_URL})...")
+    # ── 1. API connectivity check ──
+    logger.info(f"Checking DashScope API connectivity ({API_URL})...")
     if not await _check_api_connectivity():
         return
 
-    # ── 2. 多模态链路测试（含图片） ──
-    logger.info("🖼️  测试多模态 API（含图片）...")
+    # ── 2. Multimodal link test (with image) ──
+    logger.info("Testing multimodal API (with image)...")
     try:
         _dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
         _b64 = img_to_b64(_dummy_img)
@@ -418,15 +413,15 @@ async def main_async():
             async with _s.post(API_URL, json=_payload, headers=_headers, timeout=_timeout) as _r:
                 _body = await _r.json()
                 if _r.status == 200:
-                    logger.info(f"✅ 多模态 API 通过，回复: {str(_body['choices'][0]['message']['content'])[:80]}")
+                    logger.info(f"Multimodal API OK, reply: {str(_body['choices'][0]['message']['content'])[:80]}")
                 else:
-                    logger.error(f"❌ 多模态 API 错误 HTTP {_r.status}: {str(_body)[:300]}")
+                    logger.error(f"Multimodal API error HTTP {_r.status}: {str(_body)[:300]}")
                     return
     except asyncio.TimeoutError:
-        logger.error("❌ 多模态 API 超时（30s），请检查模型名称或网络")
+        logger.error("Multimodal API timeout (30s). Check model name or network.")
         return
     except Exception as _e:
-        logger.error(f"❌ 多模态 API 测试失败: {repr(_e)}")
+        logger.error(f"Multimodal API test failed: {repr(_e)}")
         return
 
     # ── 3. 数据准备 ──
@@ -451,10 +446,10 @@ async def main_async():
     tasks_to_run = pending_tasks[:args.num_tasks]
     total = len(tasks_to_run)
 
-    logger.info(f"🚀 启动蒸馏 | 并发={TASK_CONCURRENCY} | 待处理={total} 个节点")
+    logger.info(f"Starting distillation | concurrency={TASK_CONCURRENCY} | pending={total} nodes")
     logger.info(f"   trajectories_per_node={args.trajectories_per_node} | "
                 f"max_attempts={args.max_attempts} | "
-                f"max_hard/class={args.max_hard_per_class or '不限'} | "
+                f"max_hard/class={args.max_hard_per_class or 'unlimited'} | "
                 f"max_easy/class={args.max_easy_per_class}")
 
     # ── 4. 并发控制与线程池 ──
@@ -484,18 +479,38 @@ async def main_async():
             if easy_class_counts.get(node_class, 0) >= args.max_easy_per_class:
                 return False
 
+        # Build SFT messages.
+        # Image is included only in the first user turn as an <image> placeholder;
+        # the actual base64 bytes go into the top-level "images" list so that
+        # training frameworks (e.g. swift / LLaMA-Factory) can splice it into
+        # the <image> token position of the small model being trained.
         sft_messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
-        for step in entry["traj"]:
-            sft_messages.append({"role": "user",      "content": step["user"]})
+        image_b64 = entry.get("image_b64")  # may be None if env returned no image
+        for step_i, step in enumerate(entry["traj"]):
+            # step["user"] is a list of {"type": "text", "text": ...} parts (no image_url)
+            if step_i == 0 and image_b64:
+                # Prepend <image> placeholder to the text of the first user turn
+                text_parts = [p for p in step["user"] if p.get("type") == "text"]
+                text_content = text_parts[0]["text"] if text_parts else ""
+                user_content = f"<image>\n{text_content}"
+            else:
+                text_parts = [p for p in step["user"] if p.get("type") == "text"]
+                user_content = text_parts[0]["text"] if text_parts else ""
+            sft_messages.append({"role": "user",      "content": user_content})
             sft_messages.append({"role": "assistant",  "content": step["assistant"]})
 
-        f_data.write(json.dumps({
+        record = {
             "dataset":          args.dataset,
             "node_class":       node_class,
             "difficulty_score": difficulty_score,
             "is_hard":          is_hard,
             "messages":         sft_messages,
-        }, ensure_ascii=False) + "\n")
+        }
+        # images list contains one base64-encoded JPEG string for the graph view
+        if image_b64:
+            record["images"] = [image_b64]
+
+        f_data.write(json.dumps(record, ensure_ascii=False) + "\n")
 
         if is_hard:
             hard_class_counts[node_class] = hard_class_counts.get(node_class, 0) + 1
@@ -528,18 +543,18 @@ async def main_async():
                     with open(failures_path, 'a', encoding='utf-8') as f_fail:
                         f_fail.write(json.dumps(failure_info, ensure_ascii=False) + "\n")
                     logger.info(
-                        f"[{done_count}/{total}] ❌ node={failure_info['task_id']} "
+                        f"[{done_count}/{total}] FAIL node={failure_info['task_id']} "
                         f"class={failure_info['answer']} | {failure_info['failure_type']} "
-                        f"(尝试 {failure_info['total_attempts']} 次)"
+                        f"(attempts={failure_info['total_attempts']})"
                     )
 
-                # ── 成功节点 ──
+                # ── successful node ──
                 if trajs:
                     saved_this = 0
                     node_id    = trajs[0]["task_id"]
                     node_class = trajs[0]["node_class"]
                     sr         = trajs[0].get("node_successes", 1) / max(trajs[0].get("node_attempts", 1), 1)
-                    difficulty = "困难" if sr < 0.5 else "简单"
+                    difficulty = "hard" if sr < 0.5 else "easy"
 
                     with open(stats_path, 'a', encoding='utf-8') as f_stats, \
                          open(training_data_path, 'a', encoding='utf-8') as f_data:
@@ -550,20 +565,20 @@ async def main_async():
                                 saved_traj_count += 1
 
                     logger.info(
-                        f"[{done_count}/{total}] ✅ node={node_id} class={node_class} "
-                        f"({difficulty} sr={sr:.2f}) | 本节点保存 {saved_this}/{len(trajs)} 条 "
-                        f"| 累计 {saved_traj_count} 条 (失败节点 {failed_node_count})"
+                        f"[{done_count}/{total}] OK node={node_id} class={node_class} "
+                        f"({difficulty} sr={sr:.2f}) | saved {saved_this}/{len(trajs)} "
+                        f"| total={saved_traj_count} (failed_nodes={failed_node_count})"
                     )
 
     except KeyboardInterrupt:
-        logger.info("用户中断执行。")
+        logger.info("Interrupted by user.")
     finally:
         executor.shutdown(wait=False)
         total_hard = sum(hard_class_counts.values())
         total_easy = sum(easy_class_counts.values())
         logger.info(
-            f"\n{'='*60}\n蒸馏结束 | 成功轨迹={saved_traj_count} (困难={total_hard} 简单={total_easy}) "
-            f"| 失败节点={failed_node_count}\n{'='*60}"
+            f"\n{'='*60}\nDistillation done | trajectories={saved_traj_count} (hard={total_hard} easy={total_easy}) "
+            f"| failed_nodes={failed_node_count}\n{'='*60}"
         )
 
     # ── 5. 转换 Parquet ──
@@ -571,9 +586,9 @@ async def main_async():
         try:
             df = pd.read_json(training_data_path, lines=True)
             df.to_parquet(f"distill/{args.dataset}_vgraph_training.parquet", index=False)
-            logger.info("✅ Parquet 已生成。")
+            logger.info("Parquet written.")
         except Exception as e:
-            logger.error(f"❌ Parquet 转换失败: {e}")
+            logger.error(f"Parquet conversion failed: {e}")
 
     # ── 6. 样本图片 ──
     _save_sample_images(training_data_path, args.dataset, n=5)

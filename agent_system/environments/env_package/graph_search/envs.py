@@ -51,23 +51,23 @@ class GraphSearchEnv:
 
         candidates_str = ", ".join(all_classes)
         
-        # 组装锚点情报文本
+        # Build anchor intelligence text
         anchor_str_lines = []
         for nid, cls_name in anchor_mapping.items():
-            anchor_str_lines.append(f"   - 节点 {nid} : 大概率属于【{cls_name}】领域")
-        anchor_bullet_points = "\n".join(anchor_str_lines) if anchor_str_lines else "   - (无)"
-        
+            anchor_str_lines.append(f"   - Node {nid} : most likely belongs to [{cls_name}]")
+        anchor_bullet_points = "\n".join(anchor_str_lines) if anchor_str_lines else "   - (none)"
+
         obs = (
-            f"🎯 任务：请预测目标中心节点 **{self.center_id}** 的准确类别。\n\n"
-            f"【中心节点基础先验】\n"
+            f"Task: Predict the correct category of the center node **{self.center_id}**.\n\n"
+            f"[Center Node Prior]\n"
             f"* {center_title}\n"
-            f"【操作指南与视图说明】\n"
-            f"图上展示了其局部结构的同心圆雷达图。\n"
-            f"★ **特别情报 (宏观锚点导航)** ★：图边缘的星形节点 (★) 是几个类别代表：\n"
+            f"[Visual View]\n"
+            f"The graph shows a concentric-ring radar layout of the local neighborhood.\n"
+            f"★ **Macro Anchor Intelligence** ★: Star-shaped nodes (★) at the graph boundary are category representatives:\n"
             f"{anchor_bullet_points}\n\n"
-            f"你可以自由结合视觉发现，先进行思考，再调用action。调用查阅动作：`<action>check_nodes([ID1, ID2, ...])</action>`。\n"
-            f"注意：单次动作最多允许带 5 个 ID。\n\n"
-            f"可选类别: [{candidates_str}]\n"
+            f"Think freely, then call an action. Query action: `<action>check_nodes([ID1, ID2, ...])</action>`.\n"
+            f"Note: at most 5 IDs per action call.\n\n"
+            f"Candidate categories: [{candidates_str}]\n"
         )
 
         infos = {"center_id": self.center_id, "answer": self.answer, "step": self.step_count, "mode": "V-GraphAgent"}
@@ -127,7 +127,7 @@ class GraphSearchEnv:
                     
                     self.check_node_count += 1
                 else:
-                    obs_lines.append(f"错误：节点 {tid} 不在当前雷达视野内。")
+                    obs_lines.append(f"Error: Node {tid} is not within the current radar view.")
                     reward += -0.05
             
             obs = "\n\n".join(obs_lines)
@@ -139,13 +139,13 @@ class GraphSearchEnv:
             
             if is_correct:
                 reward = 1.0
-                obs = "预测正确！"
+                obs = "Correct! Well done."
             else:
-                # 【修改点 3】：彻底删除 -2.0 的盲猜惩罚，统一给 -1.0
+                # Remove -2.0 blind-guess penalty, unified to -1.0
                 reward = -1.0
-                obs = "预测错误。"
+                obs = "Incorrect prediction."
         else:
-            obs = "无效动作格式，请检查拼写。"
+            obs = "Invalid action format. Please check your syntax."
             reward = -0.1
 
         failure_reason = "Success"
