@@ -179,28 +179,38 @@ class GraphVisualizer:
             'confusion': self.global_confusion_matrix
         }
 
-    def _calibrate_global_sim(self, sample_size=800) -> Tuple[float, float]:
-        """[优化] 向量化加速特征相似度分布校准"""
-        print(f"[GraphVisualizer] 正在校准 '{self.dataset_name}' 的全局特征相似度分布...")
+    def _calibrate_global_sim(self, sample_size=800, num_rounds=7) -> Tuple[float, float]:
+        """
+        多轮随机采样后取均值，避免单次采样偏差导致色谱校准结果不稳定后被缓存固化。
+        每轮独立采样 sample_size 对节点，共 num_rounds 轮，取各轮 4%/96% 分位数的均值。
+        """
+        print(f"[GraphVisualizer] 正在校准 '{self.dataset_name}' 的全局特征相似度分布"
+              f"（{num_rounds} 轮 × {sample_size} 对）...")
         num_nodes = len(self.feat_matrix)
-        if num_nodes < 2: 
+        if num_nodes < 2:
             return 0.0, 1.0
-        
-        idx1 = np.random.randint(0, num_nodes, sample_size)
-        idx2 = np.random.randint(0, num_nodes, sample_size)
-        
-        # 使用 einsum 提升批量点积计算速度
-        sims = np.einsum('ij,ij->i', self.feat_matrix[idx1], self.feat_matrix[idx2])
-        
-        # 截取 4% 和 96% 分位数
-        global_min, global_max = np.percentile(sims, [4, 96])
-        
+
+        round_mins, round_maxs = [], []
+        for _ in range(num_rounds):
+            idx1 = np.random.randint(0, num_nodes, sample_size)
+            idx2 = np.random.randint(0, num_nodes, sample_size)
+            sims = np.einsum('ij,ij->i', self.feat_matrix[idx1], self.feat_matrix[idx2])
+            r_min, r_max = np.percentile(sims, [4, 96])
+            round_mins.append(r_min)
+            round_maxs.append(r_max)
+
+        # 多轮均值，消除单轮随机误差，结果稳定后再保存到磁盘
+        global_min = float(np.mean(round_mins))
+        global_max = float(np.mean(round_maxs))
+
         if global_max - global_min < 1e-5:
             global_min -= 0.1
             global_max += 0.1
-            
-        print(f"[GraphVisualizer] 色谱拉伸校准完毕: 纯蓝(4%)={global_min:.4f}, 纯红(96%)={global_max:.4f}")
-        return float(global_min), float(global_max)
+
+        print(f"[GraphVisualizer] 色谱拉伸校准完毕: "
+              f"纯蓝(4%)={global_min:.4f} ± {np.std(round_mins):.4f}, "
+              f"纯红(96%)={global_max:.4f} ± {np.std(round_maxs):.4f}")
+        return global_min, global_max
 
     def _build_robust_anchors_and_confusion(self):
         print(f"[GraphVisualizer] 正在构建 '{self.dataset_name}' 的鲁棒类锚点与全局混淆矩阵...")
