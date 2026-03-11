@@ -4,9 +4,19 @@ import torch
 from tqdm import tqdm
 from sentence_transformers import SentenceTransformer
 
+# ---- 网络下载配置 ----
+# 优先使用 HF_ENDPOINT 环境变量；若未设置，自动切换到国内镜像（hf-mirror.com）
+# 若已将模型下载到本地，将 LOCAL_MODEL_PATH 设置为本地目录路径可完全跳过网络
+# 手动预下载命令（只需执行一次）:
+#   pip install -U huggingface_hub
+#   HF_ENDPOINT=https://hf-mirror.com huggingface-cli download BAAI/bge-base-en-v1.5 --local-dir ./models/bge-base-en-v1.5
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
 def main():
     # ================= 配置区 =================
-    MODEL_NAME = 'BAAI/bge-base-en-v1.5' 
+    # 本地路径优先：若下载过模型，填写本地目录；否则留空，自动从镜像下载
+    LOCAL_MODEL_PATH = ""   # 例: "./models/bge-base-en-v1.5"
+    MODEL_NAME = LOCAL_MODEL_PATH if LOCAL_MODEL_PATH else 'BAAI/bge-base-en-v1.5'
     DATASET_DIR = "./datasets/add_sim"
     OUTPUT_DIR = "./datasets"
     DATASETS = ["cora", "pubmed", "arxiv"]
