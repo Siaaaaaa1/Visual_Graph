@@ -17,11 +17,17 @@ import matplotlib.patches as mpatches
 from collections import defaultdict
 import threading
 
+# 强制在主线程预建 matplotlib 字体缓存，避免多线程首次渲染时并发扫描字体导致卡死
+import matplotlib.font_manager as _fm
+_fm.fontManager  # 触发单次字体扫描并缓存，后续所有线程直接复用
+
 class GraphVisualizer:
     # [优化] 类级别内存缓存
     _GLOBAL_DATA_CACHE = {}
     _CACHE_LOCK = threading.Lock()
-    
+    # matplotlib 非线程安全，所有渲染操作必须串行化
+    _RENDER_LOCK = threading.Lock()
+
     # [新增] 磁盘缓存配置
     CACHE_DIR = "./graph_cache"
 
@@ -462,61 +468,38 @@ class GraphVisualizer:
                 r = r_dict_other[n]
                 pos[n] = np.array([r * np.cos(angle), r * np.sin(angle)])
 
-        # 4. 绘图渲染
-        fig = Figure(figsize=(self.BASE_FIG_SIZE, self.BASE_FIG_SIZE))
-        canvas = FigureCanvas(fig)
-        ax = fig.add_subplot(111)
-        
-        edges_1hop = [(u, v) for u, v in G.edges() if u == center_id or v == center_id]
-        edges_other = [(u, v) for u, v in G.edges() if u != center_id and v != center_id]
-        
-        nx.draw_networkx_edges(G, pos, edgelist=edges_1hop, alpha=0.85, edge_color="dimgray", width=2.5, ax=ax)
-        nx.draw_networkx_edges(G, pos, edgelist=edges_other, alpha=0.65, edge_color="gray", style="dashed", width=1.5, ax=ax)
-
+        # 4. 节点分类（纯 Python，无 matplotlib，不需要锁）
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         shapes_dict["s"].append(center_id)
         shapes_dict["*"].extend([n for n in global_hubs_to_add if n in nodes_to_draw])
-        
+
         local_nodes = [n for n in nodes_to_draw if n != center_id and n not in global_hubs_to_add]
-        potential_in_hubs = []
-        potential_out_hubs = []
-        
+        potential_in_hubs, potential_out_hubs = [], []
         for nid in local_nodes:
             deg_info = self.get_node_degree_info(nid)
             in_d = deg_info.get("in_degree", 0)
             out_d = deg_info.get("out_degree", 0)
             if in_d > 5 and in_d >= out_d: potential_in_hubs.append((nid, in_d))
             elif out_d > 5 and out_d > in_d: potential_out_hubs.append((nid, out_d))
-                
         potential_in_hubs.sort(key=lambda x: x[1], reverse=True)
         potential_out_hubs.sort(key=lambda x: x[1], reverse=True)
-        top_in_hubs = set(x[0] for x in potential_in_hubs[:2])
+        top_in_hubs  = set(x[0] for x in potential_in_hubs[:2])
         top_out_hubs = set(x[0] for x in potential_out_hubs[:2])
-        
         for nid in local_nodes:
             if nid in top_in_hubs: shapes_dict["^"].append(nid)
             elif nid in top_out_hubs: shapes_dict["v"].append(nid)
             else: shapes_dict["o"].append(nid)
 
         node_catalog_info = {}
+        role_map = {"s": "Center", "*": "Macro Hub", "^": "In-Hub", "v": "Out-Hub", "o": "Normal"}
         for shape_marker, nlist in shapes_dict.items():
-            if not nlist: continue
-            colors = [node_colors[n] for n in nlist]
-            if shape_marker == "*": size = 3000
-            elif shape_marker == "s": size = 2200 
-            elif shape_marker in ["^", "v"]: size = 2500
-            else: size = 2000
-            
-            nx.draw_networkx_nodes(G, pos, nodelist=nlist, node_color=colors, edgecolors="black", linewidths=2.0, node_size=size, node_shape=shape_marker, ax=ax)
-            role_map = {"s": "Center", "*": "Macro Hub", "^": "In-Hub", "v": "Out-Hub", "o": "Normal"}
             for n in nlist:
                 node_catalog_info[str(n)] = {"role": role_map[shape_marker], "similarity": f"{node_sims[n]:.2f}"}
 
         max_radius = r2_max if other_nodes else (r1_max if hop1_nodes else 1.0)
         limit = max_radius * 1.2
+        y_offset = limit * 0.035
         label_pos = {}
-        y_offset = limit * 0.035 
-        
         for nid, (x, y) in pos.items():
             if nid in top_out_hubs: label_pos[nid] = (x, y + y_offset)
             elif nid in top_in_hubs: label_pos[nid] = (x, y - y_offset)
@@ -524,35 +507,50 @@ class GraphVisualizer:
 
         labels_center = {center_id: str(center_id)}
         labels_normal = {nid: str(nid) for nid in G.nodes() if nid != center_id and len(str(nid)) < 5}
-        labels_small = {nid: str(nid) for nid in G.nodes() if nid != center_id and len(str(nid)) >= 5}
-        outline_effect = [pe.withStroke(linewidth=3, foreground='white')]
+        labels_small  = {nid: str(nid) for nid in G.nodes() if nid != center_id and len(str(nid)) >= 5}
 
-        texts_c = nx.draw_networkx_labels(G, label_pos, labels=labels_center, font_size=14, font_weight="bold", font_color="black", ax=ax)
-        for t in texts_c.values(): t.set_path_effects(outline_effect)
-        if labels_normal:
-            texts_n = nx.draw_networkx_labels(G, label_pos, labels=labels_normal, font_size=12, font_weight="bold", font_color="black", ax=ax)
-            for t in texts_n.values(): t.set_path_effects(outline_effect)
-        if labels_small:
-            texts_s = nx.draw_networkx_labels(G, label_pos, labels=labels_small, font_size=10, font_weight="bold", font_color="black", ax=ax)
-            for t in texts_s.values(): t.set_path_effects(outline_effect)
+        # 5. 绘图渲染（加锁：matplotlib 字体查找等全局状态非线程安全）
+        with GraphVisualizer._RENDER_LOCK:
+            fig = Figure(figsize=(self.BASE_FIG_SIZE, self.BASE_FIG_SIZE))
+            canvas = FigureCanvas(fig)
+            ax = fig.add_subplot(111)
 
-        legend_elements = [
-            mpatches.Patch(facecolor=cmap(0.9), edgecolor='k', label='High Semantic Sim (Red)'),
-            mpatches.Patch(facecolor=cmap(0.5), edgecolor='k', label='Neutral Sim (White)'),
-            mpatches.Patch(facecolor=cmap(0.1), edgecolor='k', label='Low Semantic Sim (Blue)')
-        ]
-        ax.legend(handles=legend_elements, loc='upper left', title="Color: Similarity", fontsize=12, title_fontsize=14)
-        ax.text(0.95, 0.95, 'Shapes:\n■ Center\n★ Macro Cluster\n▲/▼ Topology Hubs\n● Normal Node', 
-                transform=ax.transAxes, fontsize=12, verticalalignment='top', horizontalalignment='right',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
+            nx.draw_networkx_edges(G, pos, edgelist=edges_1hop, alpha=0.85, edge_color="dimgray", width=2.5, ax=ax)
+            nx.draw_networkx_edges(G, pos, edgelist=edges_other, alpha=0.65, edge_color="gray", style="dashed", width=1.5, ax=ax)
 
-        ax.set_xlim(-limit, limit)
-        ax.set_ylim(-limit, limit)
-        ax.axis("off")
-        
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.1)
-        img_bytes = buf.getvalue()
-        buf.seek(0)
-        
+            for shape_marker, nlist in shapes_dict.items():
+                if not nlist: continue
+                colors = [node_colors[n] for n in nlist]
+                size = {"*": 3000, "s": 2200, "^": 2500, "v": 2500}.get(shape_marker, 2000)
+                nx.draw_networkx_nodes(G, pos, nodelist=nlist, node_color=colors,
+                                       edgecolors="black", linewidths=2.0,
+                                       node_size=size, node_shape=shape_marker, ax=ax)
+
+            outline_effect = [pe.withStroke(linewidth=3, foreground='white')]
+            texts_c = nx.draw_networkx_labels(G, label_pos, labels=labels_center, font_size=14, font_weight="bold", font_color="black", ax=ax)
+            for t in texts_c.values(): t.set_path_effects(outline_effect)
+            if labels_normal:
+                texts_n = nx.draw_networkx_labels(G, label_pos, labels=labels_normal, font_size=12, font_weight="bold", font_color="black", ax=ax)
+                for t in texts_n.values(): t.set_path_effects(outline_effect)
+            if labels_small:
+                texts_s = nx.draw_networkx_labels(G, label_pos, labels=labels_small, font_size=10, font_weight="bold", font_color="black", ax=ax)
+                for t in texts_s.values(): t.set_path_effects(outline_effect)
+
+            legend_elements = [
+                mpatches.Patch(facecolor=cmap(0.9), edgecolor='k', label='High Semantic Sim (Red)'),
+                mpatches.Patch(facecolor=cmap(0.5), edgecolor='k', label='Neutral Sim (White)'),
+                mpatches.Patch(facecolor=cmap(0.1), edgecolor='k', label='Low Semantic Sim (Blue)')
+            ]
+            ax.legend(handles=legend_elements, loc='upper left', title="Color: Similarity", fontsize=12, title_fontsize=14)
+            ax.text(0.95, 0.95, 'Shapes:\n■ Center\n★ Macro Cluster\n▲/▼ Topology Hubs\n● Normal Node',
+                    transform=ax.transAxes, fontsize=12, verticalalignment='top', horizontalalignment='right',
+                    bbox=dict(boxstyle='round', facecolor='white', alpha=0.8, edgecolor='gray'))
+            ax.set_xlim(-limit, limit)
+            ax.set_ylim(-limit, limit)
+            ax.axis("off")
+
+            buf = io.BytesIO()
+            fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.1)
+            img_bytes = buf.getvalue()
+
         return img_bytes, node_catalog_info, self.get_all_candidate_classes(), anchor_mapping
