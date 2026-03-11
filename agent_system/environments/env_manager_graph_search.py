@@ -34,31 +34,31 @@ You are a multimodal graph intelligence agent. Your goal is to predict the categ
 - Submit final answer: `<action>final(Category)</action>` (Category must exactly match one from the candidate list)
 
 **Format rules (violations are treated as invalid actions):**
-- Every reply MUST contain a complete `<think>...</think>` block followed by `<action>...</action>`.
+- Every reply MUST contain a complete `<thinking>...</thinking>` block followed by `<action>...</action>`.
 - All content inside `<action>` tags must use standard English punctuation: parentheses `()`, brackets `[]`, comma `,`.
 - Correct: `<action>check_nodes([42, 163, 565])</action>`
 
 ## Reasoning Framework (Metacognitive CoT)
-You MUST produce a `<think>` block before every `<action>`. The sub-headings below are suggested guides — feel free to deviate, add self-questioning, hypothesis testing, or error correction beyond these templates. Just ensure you output a belief distribution and derive the next action.
+You MUST produce a `<thinking>` block before every `<action>`. The sub-headings below are suggested guides — feel free to deviate, add self-questioning, hypothesis testing, or error correction beyond these templates. Just ensure you output a belief distribution and derive the next action.
 
 ### [Round 1 — Suggested Reasoning]
-<think>
+<thinking>
 [Initial Visual & Prior Analysis]: Combine the center node's title/abstract (if available) and initial prediction. Observe the radar chart: which 1-hop inner nodes are high-similarity (red)? Which are low-similarity (blue)? Are there key Hubs (▲, ▼)? How are the ★ macro anchors positioned relative to the center?
 [Multi-category Divergence]: What cross-domain areas might the center node touch? Are there overlapping or hierarchical relationships between candidate categories? Freely expand divergent hypotheses here.
 [Initial Belief Distribution]: Output your current probability estimate in strict JSON format (sum = 1.0):
 Belief: {"CategoryA": 0.6, "CategoryB": 0.3, "CategoryC": 0.1}
 [Exploration Strategy]: Is the current distribution confident enough to submit a final answer? If not, which specific high-value node IDs should I query next (e.g., red ▲ in 1-hop, or nodes near a ★ anchor)?
-</think>
+</thinking>
 <action>...</action>
 
 ### [Subsequent Rounds — Suggested Reasoning]
-<think>
+<thinking>
 [New Evidence Integration & Self-Reflection]: Which nodes did I query last round? Do their degrees, titles, and abstracts support or contradict my main hypothesis? Are there flaws in my previous logic? How does this update my belief distribution? Do I need more queries? What do blue/red colors, high-degree hubs, and ★ anchors each contribute? Are there contradictions or consistent signals?
 [Free Logical Reasoning]: Perform flexible cross-referencing and deep inference. E.g., "Node X is a red ▲ (high in-degree), suggesting the underlying technology belongs to domain A; the ★ anchor representing domain C is far away... Overall, the center node leans toward..."
 [Belief Update]: Update category probabilities based on visual topology and accumulated text evidence. Output in strict JSON format:
 Belief: {"CategoryA": 0.85, "CategoryC": 0.15}
 [Current Round Decision]: Has the information converged to a single clear category? If yes, call `final(Category)`. If there is still meaningful uncertainty, which IDs should I query next?
-</think>
+</thinking>
 <action>...</action>
 """
 
@@ -66,7 +66,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
     def __init__(self, envs, projection_f, config):
         self.memory = FullSequenceSearchMemory()
         super().__init__(envs, projection_f, config)
-        self._think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+        self._think_pattern = re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL | re.IGNORECASE)
         self._action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
         
         self.initial_modes = []

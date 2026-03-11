@@ -14,7 +14,7 @@ class EpisodeRewardManager:
         
         # 用于匹配完整的闭环格式
         self.format_pattern = re.compile(
-            r"<think>.*?</think>\s*<action>.*?</action>",
+            r"<thinking>.*?</thinking>\s*<action>.*?</action>",
             re.DOTALL | re.IGNORECASE
         )
                 
@@ -55,7 +55,7 @@ class EpisodeRewardManager:
                 
             # 【修改点 2】：强化格式与长度校验
             if not is_filtered:
-                think_match = re.search(r"<think>(.*?)</think>", response_str, re.DOTALL | re.IGNORECASE)
+                think_match = re.search(r"<thinking>(.*?)</thinking>", response_str, re.DOTALL | re.IGNORECASE)
                 action_match = re.search(r"<action>(.*?)</action>", response_str, re.DOTALL | re.IGNORECASE)
                 
                 if not (think_match and action_match):

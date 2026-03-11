@@ -35,7 +35,7 @@ from verl.workers.rollout.schemas import AsyncRolloutRequest, AsyncRolloutReques
 from verl.workers.rollout.sglang_rollout.sglang_rollout import SGLangRollout
 
 DEFAULT_USER_CONTENT_PREFIX = (
-    "Answer the given question. You must conduct reasoning inside <think> and </think> "
+    "Answer the given question. You must conduct reasoning inside <thinking> and </thinking> "
     "first every time you get new information. After reasoning, if you find you lack "
     "some knowledge, you can call a search engine by <tool_call> query </tool_call> "
     "and it will return the top searched results between <tool_response> and "

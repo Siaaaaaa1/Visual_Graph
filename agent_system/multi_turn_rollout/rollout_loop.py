@@ -292,7 +292,7 @@ class TrajectoryCollector:
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
 
-        think_pattern = re.compile(r"<think>(.*?)</think>", re.DOTALL | re.IGNORECASE)
+        think_pattern = re.compile(r"<thinking>(.*?)</thinking>", re.DOTALL | re.IGNORECASE)
         action_pattern = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
 
         for _step in range(self.config.env.max_steps):

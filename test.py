@@ -95,7 +95,7 @@ def main():
             print("==============================================\n")
 
             print("💡 提示：现在的脚本支持真实的、包含多行文本的大模型输出！")
-            print("请直接将带有 <think>...</think>, <summary>...</summary>, <action>...</action> 的完整内容粘贴进来。")
+            print("请直接将带有 <thinking>...</thinking>, <summary>...</summary>, <action>...</action> 的完整内容粘贴进来。")
             print("完成输入/粘贴后，请在新的一行输入 'EOF' 并回车提交。输入 'QUIT' 退出测试。\n")
 
             # 5. 真实的交互式测试循环 (Interactive Loop)
