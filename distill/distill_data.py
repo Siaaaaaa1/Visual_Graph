@@ -55,16 +55,16 @@ TARGET_SUCCESS_COUNT = 3
 
 os.makedirs("distill", exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,   # 根 logger 设 WARNING，屏蔽所有第三方库噪音
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(f"distill/distill_vgraph_{args.dataset}.log", mode='a'),
         logging.StreamHandler(sys.stdout)
     ]
 )
-# 屏蔽第三方库的冗余日志
-for _noisy in ("aiohttp", "asyncio", "matplotlib", "matplotlib.font_manager", "PIL"):
-    logging.getLogger(_noisy).setLevel(logging.WARNING)
+# 只有自己的 logger 开 DEBUG，精确定位卡点
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 # 并发控制：针对 qwen-vl-max 建议保持在 8-10 左右
@@ -173,6 +173,7 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
         current_temp = 0.6 if attempt_idx <= 5 else 0.8
 
         # 初始化环境
+        logger.debug(f"[Task {tid}] attempt={attempt_idx} — 创建 env...")
         env = await loop.run_in_executor(
             executor,
             lambda: GraphSearchEnv(
@@ -180,13 +181,16 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
                 dataset_dir=args.dataset_dir, shared_graph_data=shared_payload
             )
         )
+        logger.debug(f"[Task {tid}] attempt={attempt_idx} — env.reset (渲染图片)...")
         obs_text, obs_img, info = await loop.run_in_executor(executor, env.reset, task)
+        logger.debug(f"[Task {tid}] attempt={attempt_idx} — env.reset 完成，开始对话循环")
 
         messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
         raw_traj_steps = []
         done = False
         api_error = False
         final_reward = 0.0
+        step_idx = 0
 
         while not done:
             user_content = [{"type": "text", "text": obs_text}]
@@ -196,13 +200,16 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
 
             messages.append({"role": "user", "content": user_content})
 
+            logger.debug(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — 等待 API 响应...")
             try:
                 ans_text = await fetch_completion(session, messages, current_temp, sem)
+                logger.debug(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — API 返回 {len(ans_text)} 字符")
             except Exception as e:
                 logger.error(f"Task {tid} API Error: {repr(e)}")
                 api_error = True
                 last_failure_type = "api_error"
                 break
+            step_idx += 1
 
             messages.append({"role": "assistant", "content": ans_text})
 
