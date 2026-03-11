@@ -72,37 +72,48 @@ class GraphVisualizer:
         if not os.path.exists(self.CACHE_DIR):
             os.makedirs(self.CACHE_DIR)
 
+        # ── Step 1: 只在锁内做一次快速读取，不做任何计算 ──
         with self._CACHE_LOCK:
             mem_cache = GraphVisualizer._GLOBAL_DATA_CACHE.get(dataset_name)
 
-            # 1. 数据层：shared_data 优先，否则从内存缓存或磁盘加载
-            if shared_data is not None:
-                self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
-                self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
-            elif mem_cache is not None:
-                self._load_from_memory_cache(dataset_name)
-                return  # 数据与统计均已就绪，直接返回
-            else:
-                self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
-                self.feat_matrix = self._build_feat_matrix()
+        # ── Step 2: 内存缓存完整命中（无 shared_data 覆盖）→ 直接返回，零计算 ──
+        if mem_cache is not None and shared_data is None:
+            self._load_from_memory_cache(dataset_name)
+            return
 
-            self.all_node_ids = list(self.graph_data.keys())
-            self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
-            self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
+        # ── Step 3: 加载图数据（锁外执行，无竞争） ──
+        if shared_data is not None:
+            self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
+            self.feat_matrix = (shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None
+                                else self._build_feat_matrix())
+        else:
+            self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
+            self.feat_matrix = self._build_feat_matrix()
 
-            # 2. 统计层：独立于 shared_data，优先走内存缓存（避免每个 env 实例重复读盘/打印）
-            if mem_cache is not None and 'sim_min' in mem_cache:
-                self.global_sim_min  = mem_cache['sim_min']
-                self.global_sim_max  = mem_cache['sim_max']
-                self.proxy_class_anchors       = mem_cache['anchors']
-                self.global_confusion_matrix   = mem_cache['confusion']
-            elif not self._load_from_disk_cache(dataset_name):
-                # 3. 磁盘无缓存，执行多轮采样计算后保存（只执行一次）
-                self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
-                self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
-                self._save_to_disk_cache(dataset_name)
+        # ── Step 4: 拓扑/统计数据 —— 有缓存直接复用，不重算 ──
+        if mem_cache is not None:
+            # 内存缓存已有全部结果，直接赋值，不持锁、不重算
+            self.all_node_ids            = mem_cache['all_node_ids']
+            self.id_to_idx               = mem_cache['id_to_idx']
+            self.global_degrees          = mem_cache['global_degrees']
+            self.global_sim_min          = mem_cache['sim_min']
+            self.global_sim_max          = mem_cache['sim_max']
+            self.proxy_class_anchors     = mem_cache['anchors']
+            self.global_confusion_matrix = mem_cache['confusion']
+            return  # shared_data 的图数据已在上面加载，统计直接复用缓存
 
-            # 4. 回填内存缓存（无论是否有 shared_data，统计数据都缓存，后续实例命中第 2 步直接返回）
+        # ── Step 5: 真正的首次计算（仅执行一次，后续全走缓存） ──
+        self.all_node_ids   = list(self.graph_data.keys())
+        self.id_to_idx      = {nid: i for i, nid in enumerate(self.all_node_ids)}
+        self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
+
+        if not self._load_from_disk_cache(dataset_name):
+            self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
+            self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+            self._save_to_disk_cache(dataset_name)
+
+        # ── Step 6: 回填内存缓存（加锁保护写操作） ──
+        with self._CACHE_LOCK:
             self._update_memory_cache(dataset_name)
 
     def _get_cache_file_path(self, dataset_name: str) -> str:
