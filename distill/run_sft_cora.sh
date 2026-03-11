@@ -16,19 +16,28 @@ if [ ! -f "${PARQUET}" ]; then echo "[ERROR] 未找到 ${PARQUET}，请先运行
 
 export WANDB_ENTITY="zzy_szsh"
 
-echo "[${DATASET}] 准备训练数据..."
+echo "[${DATASET}] 准备训练数据（困难全保留，简单适量）..."
 python3 - <<EOF
 import pandas as pd
 
 df = pd.read_parquet("${PARQUET}")
 print(f"原始数据: {len(df)} 条")
 print(f"类别分布:\n{df['node_class'].value_counts().to_string()}")
-print(f"难度分布: mean={df['difficulty_score'].mean():.3f}, "
-      f"hard(>0.33)={( df['difficulty_score'] > 0.33).sum()} 条")
 
-df = df.sample(frac=1, random_state=42).reset_index(drop=True)
-df.to_parquet("${PROCESSED}", index=False)
-print(f"最终训练集: {len(df)} 条 → ${PROCESSED}")
+# 困难定义：节点成功率 < 50%（is_hard 列由蒸馏时写入；旧数据回退到 difficulty_score > 0.5）
+if 'is_hard' in df.columns:
+    hard = df[df['is_hard'] == True]
+    easy = df[df['is_hard'] == False]
+else:
+    hard = df[df['difficulty_score'] > 0.5]
+    easy = df[df['difficulty_score'] <= 0.5]
+
+print(f"困难样本: {len(hard)} 条 | 简单样本: {len(easy)} 条")
+
+# cora 数据集较小，全量保留困难 + 简单（不额外截断）
+balanced = pd.concat([hard, easy]).sample(frac=1, random_state=42).reset_index(drop=True)
+balanced.to_parquet("${PROCESSED}", index=False)
+print(f"最终训练集: {len(balanced)} 条（困难 {len(hard)} + 简单 {len(easy)}）→ ${PROCESSED}")
 EOF
 
 echo "[${DATASET}] 启动 SFT 训练（含早停监控）..."

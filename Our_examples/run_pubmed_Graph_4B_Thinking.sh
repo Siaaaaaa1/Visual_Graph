@@ -7,7 +7,8 @@ export VERL_PPO_ASYNC_ROLLOUT=1
 # [删除] 这一行会导致 vLLM 启动崩溃，必须删掉
 # export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-export WANDB_API_KEY="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"
+if [ -f ".env" ]; then set -a; source .env; set +a; fi
+if [ -z "${WANDB_API_KEY}" ]; then echo "错误: WANDB_API_KEY 未设置，请检查 .env"; exit 1; fi
 export MASTER_ADDRESS=127.0.0.1
 export WORLD_SIZE=8
 

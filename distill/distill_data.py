@@ -36,8 +36,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str, required=True, choices=["cora", "pubmed", "arxiv"])
 parser.add_argument("--num_tasks", type=int, default=100000)
 parser.add_argument("--dataset_dir", type=str, default="datasets")
-parser.add_argument("--max_per_class", type=int, default=0,
-                    help="每个类别标签最多保留的轨迹总条数（0=不限制）。控制总量和类别平衡。")
+parser.add_argument("--max_hard_per_class", type=int, default=0,
+                    help="每个类别困难样本（首次成功 attempt > INITIAL_MAX_ATTEMPTS）的保留上限（0=不限）。"
+                         "建议设为 0 以尽量保留所有困难样本，提升模型解决难题的能力。")
+parser.add_argument("--max_easy_per_class", type=int, default=200,
+                    help="每个类别简单样本（首次成功 attempt <= INITIAL_MAX_ATTEMPTS）的保留上限。"
+                         "设得过高会导致简单样本淹没困难样本；建议为 max_hard_per_class 的 30-50%%。")
 parser.add_argument("--trajectories_per_node", type=int, default=3,
                     help="每个节点最多收集的成功轨迹数。多条轨迹 = 同一问题的多种推理路径 = 更高多样性。")
 parser.add_argument("--max_attempts", type=int, default=15,
@@ -225,6 +229,11 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
 
     # ---- 返回结果 ----
     if collected_trajectories:
+        # 将节点级统计写入每条轨迹，供调用方计算成功率
+        node_successes = len(collected_trajectories)
+        for traj in collected_trajectories:
+            traj["node_attempts"] = actual_attempts
+            traj["node_successes"] = node_successes
         return collected_trajectories, None
 
     # 完全失败：构造 debug 信息（截取最后两步的 assistant 输出，避免 base64 图片膨胀体积）
@@ -336,10 +345,13 @@ async def main_async():
     
     saved_traj_count = 0
     failed_node_count = 0
-    class_counts: dict = {}   # {class_name: saved_count}，用于 max_per_class 门控
+    hard_class_counts: dict = {}   # {class_name: hard_saved_count}
+    easy_class_counts: dict = {}   # {class_name: easy_saved_count}
 
     logger.info(f"配置: trajectories_per_node={args.trajectories_per_node}, "
-                f"max_attempts={args.max_attempts}, max_per_class={args.max_per_class or '不限'}")
+                f"max_attempts={args.max_attempts}, "
+                f"max_hard_per_class={args.max_hard_per_class or '不限'}, "
+                f"max_easy_per_class={args.max_easy_per_class}")
 
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
@@ -368,15 +380,24 @@ async def main_async():
                         for entry in trajs:
                             node_class = entry.get("node_class", "unknown")
 
-                            # max_per_class 门控：类别配额已满则跳过
-                            if args.max_per_class > 0:
-                                if class_counts.get(node_class, 0) >= args.max_per_class:
-                                    continue
+                            # 难度判定：基于节点成功率（成功次数 / 总尝试次数）
+                            # 成功率 < 0.5 → 困难（超过一半尝试都失败）
+                            # 成功率 ≥ 0.5 → 简单
+                            node_attempts  = entry.get("node_attempts", args.max_attempts)
+                            node_successes = entry.get("node_successes", 1)
+                            success_rate   = node_successes / node_attempts if node_attempts > 0 else 1.0
+                            difficulty_score = round(1.0 - success_rate, 4)   # 越高越难
+                            is_hard = success_rate < 0.5
 
-                            # 难度分数：第几次才成功 / 最大尝试次数，归一化到 (0, 1]
-                            # 越接近 1.0 说明越难（需要更多尝试才能成功）
-                            first_attempt = entry.get("first_success_attempt", 1)
-                            difficulty_score = round(first_attempt / EXTENDED_MAX_ATTEMPTS, 4)
+                            # 困难样本：独立配额门控（0 = 不限制，尽量全保留）
+                            if is_hard:
+                                if args.max_hard_per_class > 0:
+                                    if hard_class_counts.get(node_class, 0) >= args.max_hard_per_class:
+                                        continue
+                            else:
+                                # 简单样本：严格限制，避免淹没困难样本
+                                if easy_class_counts.get(node_class, 0) >= args.max_easy_per_class:
+                                    continue
 
                             # 构造符合 SFT 格式的消息流
                             sft_messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
@@ -388,17 +409,24 @@ async def main_async():
                                 "dataset": args.dataset,
                                 "node_class": node_class,
                                 "difficulty_score": difficulty_score,
+                                "is_hard": is_hard,
                                 "messages": sft_messages
                             }, ensure_ascii=False) + "\n")
 
-                            class_counts[node_class] = class_counts.get(node_class, 0) + 1
+                            if is_hard:
+                                hard_class_counts[node_class] = hard_class_counts.get(node_class, 0) + 1
+                            else:
+                                easy_class_counts[node_class] = easy_class_counts.get(node_class, 0) + 1
                             saved_traj_count += 1
                             
     except KeyboardInterrupt:
         logger.info("用户中断执行。")
     finally:
         executor.shutdown(wait=True)
-        logger.info(f"蒸馏结束。成功轨迹: {saved_traj_count} 条，失败节点: {failed_node_count} 个")
+        total_hard = sum(hard_class_counts.values())
+        total_easy = sum(easy_class_counts.values())
+        logger.info(f"蒸馏结束。成功轨迹: {saved_traj_count} 条（困难: {total_hard} | 简单: {total_easy}），"
+                    f"失败节点: {failed_node_count} 个")
         if failed_node_count > 0:
             logger.info(f"  失败节点详情 → {failures_path}")
 

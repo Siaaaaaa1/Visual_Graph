@@ -11,7 +11,6 @@ PARQUET="distill/${DATASET}_vgraph_training.parquet"
 VAL_FILE="datasets/${DATASET}_test_slim.parquet"
 PROCESSED="/tmp/${DATASET}_sft_ready.parquet"
 
-HARD_THRESHOLD=0.33
 EASY_RATIO=${EASY_RATIO:-0.5}   # 覆盖示例: EASY_RATIO=1.0 bash distill/run_sft_arxiv.sh
 
 if [ -f ".env" ]; then set -a; source .env; set +a; fi
@@ -28,8 +27,14 @@ df = pd.read_parquet("${PARQUET}")
 print(f"原始数据: {len(df)} 条")
 print(f"类别分布（Top 10）:\n{df['node_class'].value_counts().head(10).to_string()}")
 
-hard = df[df['difficulty_score'] > ${HARD_THRESHOLD}]
-easy = df[df['difficulty_score'] <= ${HARD_THRESHOLD}]
+# 困难定义：节点成功率 < 50%（is_hard 列由蒸馏时写入；旧数据回退到 difficulty_score > 0.5）
+if 'is_hard' in df.columns:
+    hard = df[df['is_hard'] == True]
+    easy = df[df['is_hard'] == False]
+else:
+    hard = df[df['difficulty_score'] > 0.5]
+    easy = df[df['difficulty_score'] <= 0.5]
+
 print(f"困难样本: {len(hard)} 条 | 简单样本: {len(easy)} 条")
 
 easy_target = math.ceil(len(hard) * ${EASY_RATIO})

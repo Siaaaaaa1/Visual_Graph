@@ -1,6 +1,6 @@
 #!/bin/bash
 # SFT 训练 —— pubmed 数据集
-# 策略：困难样本全保留，简单样本 1:1 配比
+# 策略：困难样本（节点成功率<50%）全保留，简单样本 1:1 配比
 # 早停：连续 3 次验证集 loss 无改善时自动停止
 # 用法: bash distill/run_sft_pubmed.sh（需在 Visual_Graph/ 根目录运行）
 
@@ -9,7 +9,6 @@ DATASET="pubmed"
 PARQUET="distill/${DATASET}_vgraph_training.parquet"
 VAL_FILE="datasets/${DATASET}_test_slim.parquet"
 PROCESSED="/tmp/${DATASET}_sft_ready.parquet"
-HARD_THRESHOLD=0.33   # difficulty_score > 此值视为困难样本（attempt_idx > 5）
 
 if [ -f ".env" ]; then set -a; source .env; set +a; fi
 if [ -z "${WANDB_API_KEY}" ]; then echo "[ERROR] WANDB_API_KEY 未设置"; exit 1; fi
@@ -25,8 +24,14 @@ df = pd.read_parquet("${PARQUET}")
 print(f"原始数据: {len(df)} 条")
 print(f"类别分布:\n{df['node_class'].value_counts().to_string()}")
 
-hard = df[df['difficulty_score'] > ${HARD_THRESHOLD}]
-easy = df[df['difficulty_score'] <= ${HARD_THRESHOLD}]
+# 困难定义：节点成功率 < 50%（is_hard 列由蒸馏时写入；旧数据回退到 difficulty_score > 0.5）
+if 'is_hard' in df.columns:
+    hard = df[df['is_hard'] == True]
+    easy = df[df['is_hard'] == False]
+else:
+    hard = df[df['difficulty_score'] > 0.5]
+    easy = df[df['difficulty_score'] <= 0.5]
+
 print(f"困难样本: {len(hard)} 条 | 简单样本: {len(easy)} 条")
 
 easy_sampled = easy.sample(n=min(len(hard), len(easy)), random_state=42)
