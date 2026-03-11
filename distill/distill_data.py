@@ -55,16 +55,16 @@ TARGET_SUCCESS_COUNT = 3
 
 os.makedirs("distill", exist_ok=True)
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(f"distill/distill_vgraph_{args.dataset}.log", mode='a'),
         logging.StreamHandler(sys.stdout)
     ]
 )
-# 避免 aiohttp/asyncio 等库的 DEBUG 日志干扰
-logging.getLogger("aiohttp").setLevel(logging.WARNING)
-logging.getLogger("asyncio").setLevel(logging.WARNING)
+# 屏蔽第三方库的冗余日志
+for _noisy in ("aiohttp", "asyncio", "matplotlib", "matplotlib.font_manager", "PIL"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # 并发控制：针对 qwen-vl-max 建议保持在 8-10 左右
@@ -157,8 +157,6 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
     last_attempt_steps = []   # 最后一次尝试的完整步骤，供 debug 用
     last_failure_type = "no_correct_answer"
     actual_attempts = 0
-
-    logger.debug(f"[Task {tid}] 开始执行，answer={task['answer']}")
 
     for attempt_idx in range(1, max_attempts + 1):
         actual_attempts = attempt_idx
@@ -372,6 +370,20 @@ async def main_async():
     random.shuffle(pending_tasks)
     tasks_to_run = pending_tasks[:args.num_tasks]
     
+    # 预热 matplotlib 字体缓存（只在第一次渲染时扫描字体，之后所有 env 直接复用）
+    logger.info("🎨 预热 matplotlib 字体缓存...")
+    try:
+        from agent_system.environments.env_package.graph_search.graph_visualizer import GraphVisualizer
+        _warmup_viz = GraphVisualizer(
+            dataset_name=args.dataset, dataset_dir=args.dataset_dir,
+            shared_data=shared_payload
+        )
+        _warmup_center = all_tasks[0]["center_id"] if all_tasks else 0
+        _warmup_viz.draw_vgraph_radar_layout(_warmup_center)
+        logger.info("🎨 字体缓存预热完成")
+    except Exception as e:
+        logger.warning(f"字体预热失败（不影响蒸馏）: {e}")
+
     logger.info(f"🚀 启动蒸馏。待执行任务数: {len(tasks_to_run)}")
     
     connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
