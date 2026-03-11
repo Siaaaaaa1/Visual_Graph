@@ -129,7 +129,9 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "model": "qwen3-vl-plus",
         "messages": msgs,
         "temperature": temp,
-        "stop": ["</action>"]
+        # 不使用 stop 参数：DashScope 对 stop 的处理可能截断模型输出，
+        # 导致 </action> 被提前触发而丢失 <action> 内容。
+        # 改为让模型输出完整响应，由调用方用正则提取 action。
     }
     async with sem:  # sem 由调用方传入，与 TASK_CONCURRENCY 对齐
         timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=90)
@@ -138,7 +140,7 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
                 error_text = await response.text()
                 raise RuntimeError(f"HTTP {response.status}: {error_text[:300]}")
             data = await response.json()
-            return data["choices"][0]["message"]["content"] + "</action>"
+            return data["choices"][0]["message"]["content"]
 
 # ================= 7. 核心任务蒸馏逻辑 =================
 async def run_task_async(task, text_db, shared_payload, session, sem, executor,
@@ -209,7 +211,7 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
                 preview = ans_text.replace("\n", " ")[:300]
                 logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — ← API返回 ({len(ans_text)}字符): {preview}")
             except Exception as e:
-                logger.error(f"Task {tid} API Error: {repr(e)}")
+                logger.error(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — API ERROR: {repr(e)}")
                 api_error = True
                 last_failure_type = "api_error"
                 break
@@ -331,7 +333,7 @@ async def _check_api_connectivity():
     test_payload = {
         "model": "qwen3-vl-plus",
         "messages": [{"role": "user", "content": "hi"}],
-        "max_tokens": 1,
+        "max_tokens": 5,
     }
     headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}", "Content-Type": "application/json"}
     timeout = aiohttp.ClientTimeout(total=15, connect=10)
