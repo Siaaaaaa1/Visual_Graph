@@ -17,9 +17,11 @@ import matplotlib.patches as mpatches
 from collections import defaultdict
 import threading
 
-# 强制在主线程预建 matplotlib 字体缓存，避免多线程首次渲染时并发扫描字体导致卡死
-import matplotlib.font_manager as _fm
-_fm.fontManager  # 触发单次字体扫描并缓存，后续所有线程直接复用
+# 显式指定 matplotlib 自带字体，完全跳过系统字体扫描
+# DejaVu Sans 随 matplotlib 安装，100% 存在，无需 findfont 搜索
+import matplotlib as _mpl
+_mpl.rcParams['font.family'] = 'DejaVu Sans'
+_mpl.rcParams['font.sans-serif'] = ['DejaVu Sans']
 
 class GraphVisualizer:
     # [优化] 类级别内存缓存

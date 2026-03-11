@@ -1,6 +1,9 @@
 import os
 import sys
 import json
+import matplotlib as _mpl
+_mpl.rcParams['font.family'] = 'DejaVu Sans'
+_mpl.rcParams['font.sans-serif'] = ['DejaVu Sans']
 import base64
 import logging
 import argparse
@@ -67,8 +70,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# 并发控制：针对 qwen-vl-max 建议保持在 8-10 左右
-MAX_CONCURRENT_REQUESTS = 8   
+TASK_CONCURRENCY = 10   # 同时运行的轨迹任务数（env + API 全链路并发上限）
 
 # ================= 4. 辅助函数 =================
 def ndarray_to_bytes(img_array: np.ndarray) -> bytes:
@@ -129,7 +131,7 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "temperature": temp,
         "stop": ["</action>"]
     }
-    async with sem:
+    async with sem:  # sem 由调用方传入，与 TASK_CONCURRENCY 对齐
         timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=90)
         async with session.post(API_URL, json=payload, headers=headers, timeout=timeout) as response:
             if response.status != 200:
@@ -353,12 +355,13 @@ async def main_async():
         logger.error("DASHSCOPE_API_KEY 缺失！")
         return
 
-    logger.info(f"🔌 正在验证 DashScope API 连通性... ({API_URL})")
+    # ── 1. API 连通性检查 ──
+    logger.info(f"🔌 验证 DashScope API ({API_URL})...")
     if not await _check_api_connectivity():
         return
 
-    # 用真实多模态请求测试（文字+图片），确认 VL 推理链路可用
-    logger.info("🖼️  正在测试多模态 API（含图片）...")
+    # ── 2. 多模态链路测试（含图片） ──
+    logger.info("🖼️  测试多模态 API（含图片）...")
     try:
         _dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
         _b64 = img_to_b64(_dummy_img)
@@ -367,161 +370,170 @@ async def main_async():
             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_b64}"}}
         ]}]
         _headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}", "Content-Type": "application/json"}
-        _payload = {"model": "qwen3-vl-plus", "messages": _test_msgs, "max_tokens": 10}
-        _timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
+        _payload  = {"model": "qwen3-vl-plus", "messages": _test_msgs, "max_tokens": 10}
+        _timeout  = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
         async with aiohttp.ClientSession() as _s:
             async with _s.post(API_URL, json=_payload, headers=_headers, timeout=_timeout) as _r:
                 _body = await _r.json()
                 if _r.status == 200:
-                    _reply = _body["choices"][0]["message"]["content"]
-                    logger.info(f"✅ 多模态 API 测试通过，模型回复: {_reply[:80]}")
+                    logger.info(f"✅ 多模态 API 通过，回复: {str(_body['choices'][0]['message']['content'])[:80]}")
                 else:
-                    logger.error(f"❌ 多模态 API 返回错误 HTTP {_r.status}: {str(_body)[:300]}")
+                    logger.error(f"❌ 多模态 API 错误 HTTP {_r.status}: {str(_body)[:300]}")
                     return
     except asyncio.TimeoutError:
-        logger.error("❌ 多模态 API 超时（30s），图片推理链路不通，请检查模型名称或网络")
+        logger.error("❌ 多模态 API 超时（30s），请检查模型名称或网络")
         return
     except Exception as _e:
         logger.error(f"❌ 多模态 API 测试失败: {repr(_e)}")
         return
 
+    # ── 3. 数据准备 ──
     all_tasks, text_db, shared_payload = prepare_shared_assets(args.dataset, args.dataset_dir)
-    
-    stats_path = f"distill/{args.dataset}_vgraph_stats.jsonl"
+
+    stats_path         = f"distill/{args.dataset}_vgraph_stats.jsonl"
     training_data_path = f"distill/{args.dataset}_vgraph_training.jsonl"
-    failures_path = f"distill/{args.dataset}_debug_failures.jsonl"
-    
+    failures_path      = f"distill/{args.dataset}_debug_failures.jsonl"
+
     completed_tids = set()
     if os.path.exists(stats_path):
         with open(stats_path, 'r', encoding='utf-8') as f:
             for line in f:
                 if line.strip():
                     try:
-                        data = json.loads(line)
-                        completed_tids.add(data["tid"])
-                    except: pass
-                        
+                        completed_tids.add(json.loads(line)["tid"])
+                    except Exception:
+                        pass
+
     pending_tasks = [t for t in all_tasks if t["center_id"] not in completed_tids]
     random.shuffle(pending_tasks)
     tasks_to_run = pending_tasks[:args.num_tasks]
-    
-    # 预热 matplotlib 字体缓存（只在第一次渲染时扫描字体，之后所有 env 直接复用）
-    logger.info("🎨 预热 matplotlib 字体缓存...")
-    try:
-        from agent_system.environments.env_package.graph_search.graph_visualizer import GraphVisualizer
-        _warmup_viz = GraphVisualizer(
-            dataset_name=args.dataset, dataset_dir=args.dataset_dir,
-            shared_data=shared_payload
-        )
-        _warmup_center = all_tasks[0]["center_id"] if all_tasks else 0
-        _warmup_viz.draw_vgraph_radar_layout(_warmup_center)
-        logger.info("🎨 字体缓存预热完成")
-    except Exception as e:
-        logger.warning(f"字体预热失败（不影响蒸馏）: {e}")
+    total = len(tasks_to_run)
 
-    logger.info(f"🚀 启动蒸馏。待执行任务数: {len(tasks_to_run)}")
-    
-    connector = aiohttp.TCPConnector(limit=MAX_CONCURRENT_REQUESTS)
-    sem = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    executor = ThreadPoolExecutor(max_workers=32)
-    
+    logger.info(f"🚀 启动蒸馏 | 并发={TASK_CONCURRENCY} | 待处理={total} 个节点")
+    logger.info(f"   trajectories_per_node={args.trajectories_per_node} | "
+                f"max_attempts={args.max_attempts} | "
+                f"max_hard/class={args.max_hard_per_class or '不限'} | "
+                f"max_easy/class={args.max_easy_per_class}")
+
+    # ── 4. 并发控制与线程池 ──
+    task_sem  = asyncio.Semaphore(TASK_CONCURRENCY)          # 任务级并发上限
+    api_sem   = asyncio.Semaphore(TASK_CONCURRENCY)          # API 调用并发（与任务对齐）
+    connector = aiohttp.TCPConnector(limit=TASK_CONCURRENCY)
+    executor  = ThreadPoolExecutor(max_workers=TASK_CONCURRENCY * 2)
+
     saved_traj_count = 0
     failed_node_count = 0
-    hard_class_counts: dict = {}   # {class_name: hard_saved_count}
-    easy_class_counts: dict = {}   # {class_name: easy_saved_count}
+    hard_class_counts: dict = {}
+    easy_class_counts: dict = {}
 
-    logger.info(f"配置: trajectories_per_node={args.trajectories_per_node}, "
-                f"max_attempts={args.max_attempts}, "
-                f"max_hard_per_class={args.max_hard_per_class or '不限'}, "
-                f"max_easy_per_class={args.max_easy_per_class}")
+    def _save_entry(entry: dict, f_data) -> bool:
+        """将单条轨迹写入训练文件，返回是否实际保存（配额未满）"""
+        node_class     = entry.get("node_class", "unknown")
+        node_attempts  = entry.get("node_attempts", args.max_attempts)
+        node_successes = entry.get("node_successes", 1)
+        success_rate   = node_successes / node_attempts if node_attempts > 0 else 1.0
+        difficulty_score = round(1.0 - success_rate, 4)
+        is_hard = success_rate < 0.5
+
+        if is_hard:
+            if args.max_hard_per_class > 0 and hard_class_counts.get(node_class, 0) >= args.max_hard_per_class:
+                return False
+        else:
+            if easy_class_counts.get(node_class, 0) >= args.max_easy_per_class:
+                return False
+
+        sft_messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
+        for step in entry["traj"]:
+            sft_messages.append({"role": "user",      "content": step["user"]})
+            sft_messages.append({"role": "assistant",  "content": step["assistant"]})
+
+        f_data.write(json.dumps({
+            "dataset":          args.dataset,
+            "node_class":       node_class,
+            "difficulty_score": difficulty_score,
+            "is_hard":          is_hard,
+            "messages":         sft_messages,
+        }, ensure_ascii=False) + "\n")
+
+        if is_hard:
+            hard_class_counts[node_class] = hard_class_counts.get(node_class, 0) + 1
+        else:
+            easy_class_counts[node_class] = easy_class_counts.get(node_class, 0) + 1
+        return True
 
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
-            tasks_coroutines = [
-                run_task_async(t, text_db, shared_payload, session, sem, executor,
-                               trajectories_per_node=args.trajectories_per_node,
-                               max_attempts=args.max_attempts)
-                for t in tasks_to_run
-            ]
 
-            for coro in tqdm.as_completed(tasks_coroutines, total=len(tasks_to_run), desc="蒸馏进度"):
-                trajs, failure_info = await coro
+            # 有界并发包装：每个任务在 task_sem 内运行，完成即释放槽位
+            async def run_bounded(t):
+                async with task_sem:
+                    return await run_task_async(
+                        t, text_db, shared_payload, session, api_sem, executor,
+                        trajectories_per_node=args.trajectories_per_node,
+                        max_attempts=args.max_attempts,
+                    )
 
-                # 完全失败的节点 → 写入 debug 文件
+            futures = [asyncio.create_task(run_bounded(t)) for t in tasks_to_run]
+            done_count = 0
+
+            for fut in asyncio.as_completed(futures):
+                trajs, failure_info = await fut
+                done_count += 1
+
+                # ── 失败节点 ──
                 if failure_info is not None:
                     failed_node_count += 1
                     with open(failures_path, 'a', encoding='utf-8') as f_fail:
                         f_fail.write(json.dumps(failure_info, ensure_ascii=False) + "\n")
+                    logger.info(
+                        f"[{done_count}/{total}] ❌ node={failure_info['task_id']} "
+                        f"class={failure_info['answer']} | {failure_info['failure_type']} "
+                        f"(尝试 {failure_info['total_attempts']} 次)"
+                    )
 
+                # ── 成功节点 ──
                 if trajs:
+                    saved_this = 0
+                    node_id    = trajs[0]["task_id"]
+                    node_class = trajs[0]["node_class"]
+                    sr         = trajs[0].get("node_successes", 1) / max(trajs[0].get("node_attempts", 1), 1)
+                    difficulty = "困难" if sr < 0.5 else "简单"
+
                     with open(stats_path, 'a', encoding='utf-8') as f_stats, \
                          open(training_data_path, 'a', encoding='utf-8') as f_data:
-
-                        f_stats.write(json.dumps({"tid": trajs[0]["task_id"], "count": len(trajs)}) + "\n")
-
+                        f_stats.write(json.dumps({"tid": node_id, "count": len(trajs)}) + "\n")
                         for entry in trajs:
-                            node_class = entry.get("node_class", "unknown")
+                            if _save_entry(entry, f_data):
+                                saved_this     += 1
+                                saved_traj_count += 1
 
-                            # 难度判定：基于节点成功率（成功次数 / 总尝试次数）
-                            # 成功率 < 0.5 → 困难（超过一半尝试都失败）
-                            # 成功率 ≥ 0.5 → 简单
-                            node_attempts  = entry.get("node_attempts", args.max_attempts)
-                            node_successes = entry.get("node_successes", 1)
-                            success_rate   = node_successes / node_attempts if node_attempts > 0 else 1.0
-                            difficulty_score = round(1.0 - success_rate, 4)   # 越高越难
-                            is_hard = success_rate < 0.5
+                    logger.info(
+                        f"[{done_count}/{total}] ✅ node={node_id} class={node_class} "
+                        f"({difficulty} sr={sr:.2f}) | 本节点保存 {saved_this}/{len(trajs)} 条 "
+                        f"| 累计 {saved_traj_count} 条 (失败节点 {failed_node_count})"
+                    )
 
-                            # 困难样本：独立配额门控（0 = 不限制，尽量全保留）
-                            if is_hard:
-                                if args.max_hard_per_class > 0:
-                                    if hard_class_counts.get(node_class, 0) >= args.max_hard_per_class:
-                                        continue
-                            else:
-                                # 简单样本：严格限制，避免淹没困难样本
-                                if easy_class_counts.get(node_class, 0) >= args.max_easy_per_class:
-                                    continue
-
-                            # 构造符合 SFT 格式的消息流
-                            sft_messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
-                            for step in entry["traj"]:
-                                sft_messages.append({"role": "user", "content": step["user"]})
-                                sft_messages.append({"role": "assistant", "content": step["assistant"]})
-
-                            f_data.write(json.dumps({
-                                "dataset": args.dataset,
-                                "node_class": node_class,
-                                "difficulty_score": difficulty_score,
-                                "is_hard": is_hard,
-                                "messages": sft_messages
-                            }, ensure_ascii=False) + "\n")
-
-                            if is_hard:
-                                hard_class_counts[node_class] = hard_class_counts.get(node_class, 0) + 1
-                            else:
-                                easy_class_counts[node_class] = easy_class_counts.get(node_class, 0) + 1
-                            saved_traj_count += 1
-                            
     except KeyboardInterrupt:
         logger.info("用户中断执行。")
     finally:
-        executor.shutdown(wait=True)
+        executor.shutdown(wait=False)
         total_hard = sum(hard_class_counts.values())
         total_easy = sum(easy_class_counts.values())
-        logger.info(f"蒸馏结束。成功轨迹: {saved_traj_count} 条（困难: {total_hard} | 简单: {total_easy}），"
-                    f"失败节点: {failed_node_count} 个")
-        if failed_node_count > 0:
-            logger.info(f"  失败节点详情 → {failures_path}")
+        logger.info(
+            f"\n{'='*60}\n蒸馏结束 | 成功轨迹={saved_traj_count} (困难={total_hard} 简单={total_easy}) "
+            f"| 失败节点={failed_node_count}\n{'='*60}"
+        )
 
-    # 自动转换 Parquet
+    # ── 5. 转换 Parquet ──
     if os.path.exists(training_data_path):
         try:
             df = pd.read_json(training_data_path, lines=True)
             df.to_parquet(f"distill/{args.dataset}_vgraph_training.parquet", index=False)
-            logger.info("✅ 训练集 Parquet 已生成。")
+            logger.info("✅ Parquet 已生成。")
         except Exception as e:
             logger.error(f"❌ Parquet 转换失败: {e}")
 
-    # 随机抽取 5 条轨迹，将每条第一步的图片保存到 distill/{dataset}_samples/ 供人工校验
+    # ── 6. 样本图片 ──
     _save_sample_images(training_data_path, args.dataset, n=5)
 
 if __name__ == "__main__":
