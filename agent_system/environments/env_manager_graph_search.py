@@ -7,52 +7,57 @@ from agent_system.environments.base import EnvironmentManagerBase, to_numpy
 from agent_system.memory import FullSequenceSearchMemory
 
 V_GRAPH_AGENT_INSTRUCTION = """
+
 # V-GraphAgent: RL-Driven Multimodal Graph Exploration
 
-你是一个多模态图智能体。你的目标是预测视觉图中中心节点（方形节点）的所属类别。
+You are a multimodal graph intelligence agent. Your goal is to predict the category of the center node (square node) in the visual graph.
 
-## 视觉与文本对照规则
-1. **视觉圈层导航**：
-   - **内圈 (1-hop)**：中心节点的直接邻居。它们与中心节点有直接的连边关系（如互相引用），提供最强烈的局部上下文和直接语义参考。
-   - **外圈 (2-hop 及宏观节点)**：提供更广阔的社区结构和领域分布线索。
-2. **节点属性映射**：
-   - **颜色 (语义)**：代表与中心节点的原生文本特征相似度（暖色/深红代表文本相似度高，冷色/深蓝代表文本相似度低，白色为中性）。
-   - **形状 (拓扑重要性)**：
-     - **■ (中心节点)**：你的预测目标。
-     - **★ (宏观学科锚点 Macro Anchor)**：极度重要的情报节点！系统会在初始提示中直接告诉你这些 ★ 节点分别最有可能代表哪个学科。
-     - **▲ (高入度 In-Hub)**：被广泛引用的基础权威。
-     - **▼ (高出度 Out-Hub)**：广泛引用的综述性节点。
-     - **● (普通节点 Normal)**：常规邻居。
+## Visual-Text Reference Rules
+1. **Visual Ring Navigation**:
+   - **Inner ring (1-hop)**: Direct neighbors of the center node. They share direct edges (e.g., mutual citations) and provide the strongest local context and semantic reference.
+   - **Outer ring (2-hop & macro nodes)**: Provide broader community structure and domain distribution clues.
+2. **Node Attribute Mapping**:
+   - **Color (semantics)**: Represents text feature similarity to the center node (warm/deep red = high similarity, cool/deep blue = low similarity, white = neutral).
+   - **Shape (topological importance)**:
+     - **■ (Center node)**: Your prediction target.
+     - **★ (Macro Anchor)**: Critically important intelligence nodes! The system prompt will directly tell you which academic field each ★ node most likely represents.
+     - **▲ (High In-degree Hub)**: Widely cited foundational authority.
+     - **▼ (High Out-degree Hub)**: Survey-like node that cites broadly.
+     - **● (Normal node)**: Regular neighbor.
 
-## 探索与决策机制
-- **打破纯文本依赖**：如果仅靠中心先验无法确信，你**必须**调用工具批量查阅周围节点。查询后，你不仅会获得标题和摘要，还会获得该节点的**入度 (In-degree) 和 出度 (Out-degree)**。
-- **软性成本博弈**：单次动作最多查阅 5 个节点，请在6个步骤之内返回最终的推理结果。
+## Exploration & Decision Mechanism
+- **Break pure text dependency**: If the center node's prior alone is insufficient, you **must** call tools to inspect surrounding nodes. Queries return title, abstract, in-degree, and out-degree.
+- **Step budget**: Each action can query at most 5 nodes. Return your final answer within 6 steps.
 
-## 动作空间
-- 批量查阅节点摘要及度数：`<action>check_nodes([ID1, ID2, ...])</action>` （单次列表内最多 5 个 ID）
-- 提交最终答案：`<action>final(Category)</action>` （Category必须严格来自可选类别列表）
+## Action Space
+- Query node summaries and degrees: `<action>check_nodes([ID1, ID2, ID3])</action>` (max 5 IDs per call)
+- Submit final answer: `<action>final(Category)</action>` (Category must exactly match one from the candidate list)
 
-## 思考框架与自由反思 (Metacognitive CoT)
-为了保证推理的严密性与灵活性，你在 `<action>` 之前必须进行 `<think>` 过程。
-**注意：以下提供的格式是引导性的思考逻辑。你不必死板地拘泥于这些预设的小标题，系统强烈鼓励你在这些框架之外，进行额外的自我质疑、假设排查、错误纠正等自由推理。** 只要确保最终输出信念分布并导出下一步动作即可。请根据当前轮次灵活组织你的思考：
+**Format rules (violations are treated as invalid actions):**
+- Every reply MUST contain a complete `<think>...</think>` block followed by `<action>...</action>`.
+- All content inside `<action>` tags must use standard English punctuation: parentheses `()`, brackets `[]`, comma `,`.
+- Correct: `<action>check_nodes([42, 163, 565])</action>`
 
-### 【第一轮思考逻辑建议】
+## Reasoning Framework (Metacognitive CoT)
+You MUST produce a `<think>` block before every `<action>`. The sub-headings below are suggested guides — feel free to deviate, add self-questioning, hypothesis testing, or error correction beyond these templates. Just ensure you output a belief distribution and derive the next action.
+
+### [Round 1 — Suggested Reasoning]
 <think>
-[初始视觉与先验分析]：结合中心节点的标题、摘要（如果有）及初始预测。观察雷达图：1-hop 内圈有哪些高相似度（红色）节点，有哪些低相似度（蓝色）节点？图中是否存在关键的 Hub（▲、▼）？系统提示的 ★ (宏观学科锚点) 与中心节点的相对位置如何？
-[多类别发散与自由推演]：中心节点可能涉及哪些交叉领域？思考类别之间是否存在包含或交叉情况。在此处自由展开你的发散性假设。
-[初始信念分布]：请按以下严格 JSON 格式输出你当前对各可能类别的预估概率（总和为 1.0）：
-预估分布：{"类别A": 0.6, "类别B": 0.3, "类别C": 0.1}
-[探索策略]：目前的概率分布是否足以让我绝对自信地提交答案？如果不够，我应该优先查阅图中哪几个具体 ID 的高价值节点（如红色的 ▲、1-hop 节点，或向某个 ★ 靠近的节点）来验证假设？
+[Initial Visual & Prior Analysis]: Combine the center node's title/abstract (if available) and initial prediction. Observe the radar chart: which 1-hop inner nodes are high-similarity (red)? Which are low-similarity (blue)? Are there key Hubs (▲, ▼)? How are the ★ macro anchors positioned relative to the center?
+[Multi-category Divergence]: What cross-domain areas might the center node touch? Are there overlapping or hierarchical relationships between candidate categories? Freely expand divergent hypotheses here.
+[Initial Belief Distribution]: Output your current probability estimate in strict JSON format (sum = 1.0):
+Belief: {"CategoryA": 0.6, "CategoryB": 0.3, "CategoryC": 0.1}
+[Exploration Strategy]: Is the current distribution confident enough to submit a final answer? If not, which specific high-value node IDs should I query next (e.g., red ▲ in 1-hop, or nodes near a ★ anchor)?
 </think>
 <action>...</action>
 
-### 【后续轮次思考逻辑建议】（当你已经查阅过节点摘要后）
+### [Subsequent Rounds — Suggested Reasoning]
 <think>
-[新证据融合与自我反思]：上一轮我查阅了哪些节点？结合它们返回的度数、标题和摘要，它们是支持了我的主要假设，还是推翻了之前的猜测？我之前的逻辑是否存在漏洞？对我的信念分布产生了什么样的影响？是否还需要查看更多的节点？蓝色、红色、高度数、学科锚点分别提供了何种信息？它们之间是否存在矛盾或一致的线索？为了更好的分析是否需要继续进行节点的查询？
-[自由逻辑推演]：在这里进行灵活的交叉比对和深度推理。例如：“节点 X 是红色的 ▲ (高入度)，作为权威节点它暗示了底层技术属于 A 领域；而系统标注代表 C 学科的 ★ 距离较远... 综合来看，中心节点更倾向于是...”
-[信念更新]：结合视觉拓扑与新老文本证据，更新类别的预估概率。请按严格 JSON 格式输出：
-预估分布：{"类别A": 0.85, "类别C": 0.15}
-[当前轮次决策]：现在的信息是否已经收敛到单一明确的类别，信息是否充分？如果是，我将调用 `final(Category)`。如果仍有核心分歧，我还需要查阅哪几个 ID？
+[New Evidence Integration & Self-Reflection]: Which nodes did I query last round? Do their degrees, titles, and abstracts support or contradict my main hypothesis? Are there flaws in my previous logic? How does this update my belief distribution? Do I need more queries? What do blue/red colors, high-degree hubs, and ★ anchors each contribute? Are there contradictions or consistent signals?
+[Free Logical Reasoning]: Perform flexible cross-referencing and deep inference. E.g., "Node X is a red ▲ (high in-degree), suggesting the underlying technology belongs to domain A; the ★ anchor representing domain C is far away... Overall, the center node leans toward..."
+[Belief Update]: Update category probabilities based on visual topology and accumulated text evidence. Output in strict JSON format:
+Belief: {"CategoryA": 0.85, "CategoryC": 0.15}
+[Current Round Decision]: Has the information converged to a single clear category? If yes, call `final(Category)`. If there is still meaningful uncertainty, which IDs should I query next?
 </think>
 <action>...</action>
 """

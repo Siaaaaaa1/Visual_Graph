@@ -84,6 +84,27 @@ def img_to_b64(img_array):
 
 # 正则匹配
 ACTION_PATTERN = re.compile(r"<action>(.*?)</action>", re.DOTALL | re.IGNORECASE)
+THINK_PATTERN  = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+# 中文标点检测（出现在 action 内则格式无效）
+_CN_PUNCT = re.compile(r"[，。；：""''（）【】《》、！？]")
+
+def _is_valid_step(assistant_text: str) -> bool:
+    """
+    校验单步 assistant 输出格式是否合法：
+    1. 必须包含 <think>...</think>
+    2. 必须包含 <action>...</action>
+    3. <action> 内不得出现中文标点
+    """
+    if not THINK_PATTERN.search(assistant_text):
+        return False
+    action_match = ACTION_PATTERN.search(assistant_text)
+    if not action_match:
+        return False
+    action_content = action_match.group(1)
+    if _CN_PUNCT.search(action_content):
+        return False
+    return True
 
 # ================= 5. 数据预加载 =================
 def prepare_shared_assets(dataset_name, dataset_dir):
@@ -129,9 +150,11 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "model": "qwen3-vl-plus",
         "messages": msgs,
         "temperature": temp,
-        # 不使用 stop 参数：DashScope 对 stop 的处理可能截断模型输出，
-        # 导致 </action> 被提前触发而丢失 <action> 内容。
-        # 改为让模型输出完整响应，由调用方用正则提取 action。
+        # qwen3 系列默认 enable_thinking=True：思考内容在 reasoning_content，
+        # content 只放最终答案，当模型没有输出 action 时 content="" (0字符)。
+        # 设为 False 强制全部输出（含 <think> 标签）走 content，
+        # 与 prompt 要求的 "<think>...</think><action>...</action>" 格式一致。
+        "enable_thinking": False,
     }
     async with sem:  # sem 由调用方传入，与 TASK_CONCURRENCY 对齐
         timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=90)
@@ -140,7 +163,15 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
                 error_text = await response.text()
                 raise RuntimeError(f"HTTP {response.status}: {error_text[:300]}")
             data = await response.json()
-            return data["choices"][0]["message"]["content"]
+            msg = data["choices"][0]["message"]
+            content = msg.get("content") or ""
+            # 防御：若 content 仍为空但 reasoning_content 有值（模型忽略了 enable_thinking=False），
+            # 将思考内容包回 <think> 标签，保证后续正则能正常解析
+            if not content:
+                reasoning = msg.get("reasoning_content") or ""
+                if reasoning:
+                    content = f"<think>{reasoning}</think>"
+            return content
 
 # ================= 7. 核心任务蒸馏逻辑 =================
 async def run_task_async(task, text_db, shared_payload, session, sem, executor,
@@ -236,12 +267,19 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
         last_attempt_steps = raw_traj_steps  # 始终保留最后一次尝试用于 debug
 
         if not api_error and final_reward >= 1.0:
-            collected_trajectories.append({
-                "task_id": tid,
-                "node_class": task["answer"],
-                "first_success_attempt": attempt_idx,
-                "traj": raw_traj_steps
-            })
+            # 格式校验：每一步都必须有合法的 <think> + <action>（英文标点）
+            bad_steps = [i for i, s in enumerate(raw_traj_steps)
+                         if not _is_valid_step(s.get("assistant", ""))]
+            if bad_steps:
+                logger.debug(f"[Task {tid}] attempt={attempt_idx} 格式不合法（步骤 {bad_steps} 含中文标点或缺 think），丢弃本次轨迹")
+                last_failure_type = "invalid_format"
+            else:
+                collected_trajectories.append({
+                    "task_id": tid,
+                    "node_class": task["answer"],
+                    "first_success_attempt": attempt_idx,
+                    "traj": raw_traj_steps
+                })
 
     # ---- 返回结果 ----
     if collected_trajectories:
