@@ -73,32 +73,37 @@ class GraphVisualizer:
             os.makedirs(self.CACHE_DIR)
 
         with self._CACHE_LOCK:
-            # 1. 优先尝试内存缓存加载
-            if dataset_name in GraphVisualizer._GLOBAL_DATA_CACHE and shared_data is None:
+            mem_cache = GraphVisualizer._GLOBAL_DATA_CACHE.get(dataset_name)
+
+            # 1. 数据层：shared_data 优先，否则从内存缓存或磁盘加载
+            if shared_data is not None:
+                self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
+                self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
+            elif mem_cache is not None:
                 self._load_from_memory_cache(dataset_name)
+                return  # 数据与统计均已就绪，直接返回
             else:
-                # 2. 加载/初始化基础图数据
-                if shared_data is not None:
-                    self.graph_data, self.reverse_adj, self.class_map = shared_data[:3]
-                    self.feat_matrix = shared_data[3] if len(shared_data) == 4 and shared_data[3] is not None else self._build_feat_matrix()
-                else:
-                    self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
-                    self.feat_matrix = self._build_feat_matrix()
-                
-                self.all_node_ids = list(self.graph_data.keys())
-                self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
-                self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
-                
-                # 3. 尝试从磁盘加载耗时的统计校准结果
-                if not self._load_from_disk_cache(dataset_name):
-                    # 4. 磁盘无缓存，执行计算并随后保存
-                    self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
-                    self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
-                    self._save_to_disk_cache(dataset_name)
-                
-                # 5. 回填内存缓存
-                if shared_data is None:
-                    self._update_memory_cache(dataset_name)
+                self.graph_data, self.reverse_adj, self.class_map = self.load_graph_data(dataset_name, dataset_dir)
+                self.feat_matrix = self._build_feat_matrix()
+
+            self.all_node_ids = list(self.graph_data.keys())
+            self.id_to_idx = {nid: i for i, nid in enumerate(self.all_node_ids)}
+            self.global_degrees = {nid: self.get_node_degree_info(int(nid)) for nid in self.all_node_ids}
+
+            # 2. 统计层：独立于 shared_data，优先走内存缓存（避免每个 env 实例重复读盘/打印）
+            if mem_cache is not None and 'sim_min' in mem_cache:
+                self.global_sim_min  = mem_cache['sim_min']
+                self.global_sim_max  = mem_cache['sim_max']
+                self.proxy_class_anchors       = mem_cache['anchors']
+                self.global_confusion_matrix   = mem_cache['confusion']
+            elif not self._load_from_disk_cache(dataset_name):
+                # 3. 磁盘无缓存，执行多轮采样计算后保存（只执行一次）
+                self.global_sim_min, self.global_sim_max = self._calibrate_global_sim()
+                self.proxy_class_anchors, self.global_confusion_matrix = self._build_robust_anchors_and_confusion()
+                self._save_to_disk_cache(dataset_name)
+
+            # 4. 回填内存缓存（无论是否有 shared_data，统计数据都缓存，后续实例命中第 2 步直接返回）
+            self._update_memory_cache(dataset_name)
 
     def _get_cache_file_path(self, dataset_name: str) -> str:
         return os.path.join(self.CACHE_DIR, f"{dataset_name}_stats.json")
