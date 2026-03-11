@@ -36,6 +36,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str, required=True, choices=["cora", "pubmed", "arxiv"])
 parser.add_argument("--num_tasks", type=int, default=100000)
 parser.add_argument("--dataset_dir", type=str, default="datasets")
+parser.add_argument("--max_per_class", type=int, default=0,
+                    help="每个类别标签最多保留的轨迹总条数（0=不限制）。控制总量和类别平衡。")
+parser.add_argument("--trajectories_per_node", type=int, default=3,
+                    help="每个节点最多收集的成功轨迹数。多条轨迹 = 同一问题的多种推理路径 = 更高多样性。")
+parser.add_argument("--max_attempts", type=int, default=15,
+                    help="每个节点的最大总尝试次数。超过后若仍无成功则放弃，并写入 debug 文件。")
 args = parser.parse_args()
 
 # 蒸馏门控常量
@@ -111,7 +117,7 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "Content-Type": "application/json"
     }
     payload = {
-        "model": "qwen-vl-max",
+        "model": "qwen3-vl-plus",
         "messages": msgs,
         "temperature": temp,
         "stop": ["</action>"]
@@ -126,79 +132,177 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
             return data["choices"][0]["message"]["content"] + "</action>"
 
 # ================= 7. 核心任务蒸馏逻辑 =================
-async def run_task_async(task, text_db, shared_payload, session, sem, executor):
+async def run_task_async(task, text_db, shared_payload, session, sem, executor,
+                         trajectories_per_node: int, max_attempts: int):
+    """
+    对单个节点执行多轮蒸馏。
+
+    - trajectories_per_node : 每个节点最多收集的成功轨迹数（多条 = 多样性）
+    - max_attempts           : 总尝试上限，超过后若仍无成功则放弃该节点
+    - 门控逻辑               : 前 INITIAL_MAX_ATTEMPTS 次若 0 成功 → 提前放弃
+    - 返回                   : (collected_trajectories, failure_info)
+                               failure_info 仅在完全失败时非 None
+    """
     tid = task["center_id"]
     collected_trajectories = []
     loop = asyncio.get_running_loop()
-    
-    # 逻辑：前5次只要有1次成功，就目标凑齐3条，上限15次
-    for attempt_idx in range(1, EXTENDED_MAX_ATTEMPTS + 1):
-        # 门控检查：如果前5次结束了且一条成功的都没有，直接退出
+
+    last_attempt_steps = []   # 最后一次尝试的完整步骤，供 debug 用
+    last_failure_type = "no_correct_answer"
+    actual_attempts = 0
+
+    for attempt_idx in range(1, max_attempts + 1):
+        actual_attempts = attempt_idx
+
+        # 门控：前 INITIAL_MAX_ATTEMPTS 次结束后仍 0 成功 → 提前放弃（困难节点耗尽探索预算）
         if attempt_idx > INITIAL_MAX_ATTEMPTS and len(collected_trajectories) == 0:
+            last_failure_type = "gated_out_no_early_success"
             break
-        # 目标达成检查
-        if len(collected_trajectories) >= TARGET_SUCCESS_COUNT:
+        # 目标达成
+        if len(collected_trajectories) >= trajectories_per_node:
             break
 
-        # 动态调节温度增加探索性
+        # 动态调节温度：前期保守探索，后期加大随机性
         current_temp = 0.6 if attempt_idx <= 5 else 0.8
-        
+
         # 初始化环境
         env = await loop.run_in_executor(
-            executor, 
+            executor,
             lambda: GraphSearchEnv(
                 max_steps=10, node_text_db=text_db, dataset_name=args.dataset,
                 dataset_dir=args.dataset_dir, shared_graph_data=shared_payload
             )
         )
         obs_text, obs_img, info = await loop.run_in_executor(executor, env.reset, task)
-        
-        messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}] # 使用最新的 Instruction
+
+        messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
         raw_traj_steps = []
         done = False
         api_error = False
         final_reward = 0.0
-        
+
         while not done:
             user_content = [{"type": "text", "text": obs_text}]
             if obs_img is not None:
                 b64_img = await loop.run_in_executor(executor, img_to_b64, obs_img)
                 user_content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_img}"}})
-            
+
             messages.append({"role": "user", "content": user_content})
-            
+
             try:
                 ans_text = await fetch_completion(session, messages, current_temp, sem)
             except Exception as e:
                 logger.error(f"Task {tid} API Error: {repr(e)}")
                 api_error = True
+                last_failure_type = "api_error"
                 break
 
             messages.append({"role": "assistant", "content": ans_text})
-            
-            # 解析 Action 并推进行进
+
             action_match = ACTION_PATTERN.search(ans_text)
             action_str = action_match.group(1).strip() if action_match else "ERROR"
-            
+
             next_obs_text, next_obs_img, r, done, s_info = await loop.run_in_executor(executor, env.step, action_str)
-            
+
             raw_traj_steps.append({
                 "user": user_content,
                 "assistant": ans_text
             })
-            
-            obs_text, obs_img = next_obs_text, next_obs_img
-            if done: final_reward = r
 
-        if not api_error and final_reward >= 1.0: # 环境中 reward=1.0 代表预测正确
+            obs_text, obs_img = next_obs_text, next_obs_img
+            if done:
+                final_reward = r
+
+        last_attempt_steps = raw_traj_steps  # 始终保留最后一次尝试用于 debug
+
+        if not api_error and final_reward >= 1.0:
             collected_trajectories.append({
                 "task_id": tid,
+                "node_class": task["answer"],
+                "first_success_attempt": attempt_idx,
                 "traj": raw_traj_steps
             })
 
-    return collected_trajectories if collected_trajectories else None
+    # ---- 返回结果 ----
+    if collected_trajectories:
+        return collected_trajectories, None
 
-# ================= 8. 异步主函数 =================
+    # 完全失败：构造 debug 信息（截取最后两步的 assistant 输出，避免 base64 图片膨胀体积）
+    debug_steps = []
+    for step in last_attempt_steps[-2:]:
+        debug_steps.append({
+            "assistant_text": step.get("assistant", "")[:1000],
+            "user_text": step["user"][0].get("text", "") if step.get("user") else ""
+        })
+
+    failure_info = {
+        "task_id": tid,
+        "answer": task["answer"],
+        "total_attempts": actual_attempts,
+        "failure_type": last_failure_type,
+        "last_steps_summary": debug_steps,
+    }
+    return None, failure_info
+
+# ================= 8. 样本图片保存（用于人工验证） =================
+def _save_sample_images(training_data_path: str, dataset_name: str, n: int = 5):
+    """
+    从 JSONL 训练文件中随机抽取 n 条轨迹，将每条轨迹所有步骤的图片
+    （含步骤序号和轨迹 idx）保存到 distill/{dataset}_samples/ 目录下。
+
+    - 每条轨迹以子目录 traj_{idx}/ 存放，每步图片命名为 step_{step_idx}.png
+    - 由于每步图片完全相同（雷达图不更新），可通过目视确认一致性
+    """
+    if not os.path.exists(training_data_path):
+        logger.warning("_save_sample_images: 训练文件不存在，跳过。")
+        return
+
+    sample_dir = os.path.join("distill", f"{dataset_name}_samples")
+    os.makedirs(sample_dir, exist_ok=True)
+
+    try:
+        with open(training_data_path, 'r', encoding='utf-8') as f:
+            all_entries = [json.loads(line) for line in f if line.strip()]
+
+        if not all_entries:
+            logger.warning("_save_sample_images: 训练文件为空，跳过。")
+            return
+
+        samples = random.sample(all_entries, min(n, len(all_entries)))
+        logger.info(f"💾 保存 {len(samples)} 条随机样本图片 → {sample_dir}/")
+
+        for traj_idx, entry in enumerate(samples):
+            traj_dir = os.path.join(sample_dir, f"traj_{traj_idx:02d}")
+            os.makedirs(traj_dir, exist_ok=True)
+
+            messages = entry.get("messages", [])
+            step_idx = 0
+            for msg in messages:
+                if msg["role"] != "user":
+                    continue
+                content = msg["content"]
+                if not isinstance(content, list):
+                    step_idx += 1
+                    continue
+                for part in content:
+                    if part.get("type") == "image_url":
+                        url = part["image_url"]["url"]
+                        b64_data = url.split(",", 1)[1]
+                        img_bytes = base64.b64decode(b64_data)
+                        img = Image.open(BytesIO(img_bytes))
+                        save_path = os.path.join(traj_dir, f"step_{step_idx:02d}.png")
+                        img.save(save_path)
+                        break
+                step_idx += 1
+
+            saved_steps = len(list(os.scandir(traj_dir)))
+            logger.info(f"  traj_{traj_idx:02d}: 保存了 {saved_steps} 张图片（dataset={entry.get('dataset', '?')}）")
+
+    except Exception as e:
+        logger.error(f"_save_sample_images 失败: {e}")
+
+
+# ================= 9. 异步主函数 =================
 async def main_async():
     if not DASHSCOPE_API_KEY:
         logger.error("DASHSCOPE_API_KEY 缺失！")
@@ -208,6 +312,7 @@ async def main_async():
     
     stats_path = f"distill/{args.dataset}_vgraph_stats.jsonl"
     training_data_path = f"distill/{args.dataset}_vgraph_training.jsonl"
+    failures_path = f"distill/{args.dataset}_debug_failures.jsonl"
     
     completed_tids = set()
     if os.path.exists(stats_path):
@@ -230,39 +335,72 @@ async def main_async():
     executor = ThreadPoolExecutor(max_workers=32)
     
     saved_traj_count = 0
+    failed_node_count = 0
+    class_counts: dict = {}   # {class_name: saved_count}，用于 max_per_class 门控
+
+    logger.info(f"配置: trajectories_per_node={args.trajectories_per_node}, "
+                f"max_attempts={args.max_attempts}, max_per_class={args.max_per_class or '不限'}")
+
     try:
         async with aiohttp.ClientSession(connector=connector) as session:
             tasks_coroutines = [
-                run_task_async(t, text_db, shared_payload, session, sem, executor) 
+                run_task_async(t, text_db, shared_payload, session, sem, executor,
+                               trajectories_per_node=args.trajectories_per_node,
+                               max_attempts=args.max_attempts)
                 for t in tasks_to_run
             ]
-            
+
             for coro in tqdm.as_completed(tasks_coroutines, total=len(tasks_to_run), desc="蒸馏进度"):
-                trajs = await coro
+                trajs, failure_info = await coro
+
+                # 完全失败的节点 → 写入 debug 文件
+                if failure_info is not None:
+                    failed_node_count += 1
+                    with open(failures_path, 'a', encoding='utf-8') as f_fail:
+                        f_fail.write(json.dumps(failure_info, ensure_ascii=False) + "\n")
+
                 if trajs:
                     with open(stats_path, 'a', encoding='utf-8') as f_stats, \
                          open(training_data_path, 'a', encoding='utf-8') as f_data:
-                        
+
                         f_stats.write(json.dumps({"tid": trajs[0]["task_id"], "count": len(trajs)}) + "\n")
-                        
+
                         for entry in trajs:
+                            node_class = entry.get("node_class", "unknown")
+
+                            # max_per_class 门控：类别配额已满则跳过
+                            if args.max_per_class > 0:
+                                if class_counts.get(node_class, 0) >= args.max_per_class:
+                                    continue
+
+                            # 难度分数：第几次才成功 / 最大尝试次数，归一化到 (0, 1]
+                            # 越接近 1.0 说明越难（需要更多尝试才能成功）
+                            first_attempt = entry.get("first_success_attempt", 1)
+                            difficulty_score = round(first_attempt / EXTENDED_MAX_ATTEMPTS, 4)
+
                             # 构造符合 SFT 格式的消息流
                             sft_messages = [{"role": "system", "content": V_GRAPH_AGENT_INSTRUCTION}]
                             for step in entry["traj"]:
                                 sft_messages.append({"role": "user", "content": step["user"]})
                                 sft_messages.append({"role": "assistant", "content": step["assistant"]})
-                            
+
                             f_data.write(json.dumps({
                                 "dataset": args.dataset,
+                                "node_class": node_class,
+                                "difficulty_score": difficulty_score,
                                 "messages": sft_messages
                             }, ensure_ascii=False) + "\n")
+
+                            class_counts[node_class] = class_counts.get(node_class, 0) + 1
                             saved_traj_count += 1
                             
     except KeyboardInterrupt:
         logger.info("用户中断执行。")
     finally:
         executor.shutdown(wait=True)
-        logger.info(f"蒸馏结束。共保存成功轨迹数: {saved_traj_count}")
+        logger.info(f"蒸馏结束。成功轨迹: {saved_traj_count} 条，失败节点: {failed_node_count} 个")
+        if failed_node_count > 0:
+            logger.info(f"  失败节点详情 → {failures_path}")
 
     # 自动转换 Parquet
     if os.path.exists(training_data_path):
@@ -272,6 +410,9 @@ async def main_async():
             logger.info("✅ 训练集 Parquet 已生成。")
         except Exception as e:
             logger.error(f"❌ Parquet 转换失败: {e}")
+
+    # 随机抽取 5 条轨迹，将每条第一步的图片保存到 distill/{dataset}_samples/ 供人工校验
+    _save_sample_images(training_data_path, args.dataset, n=5)
 
 if __name__ == "__main__":
     asyncio.run(main_async())

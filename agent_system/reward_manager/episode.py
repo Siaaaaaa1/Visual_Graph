@@ -67,7 +67,8 @@ class EpisodeRewardManager:
                 #     if len(think_content) < 50:
                 #         score += FORMAT_PENALTY_COEF
 
-            reward_tensor[i, valid_response_length - 1] = torch.tensor(score, dtype=torch.float32, device=prompt_ids.device)
+            if valid_response_length > 0:
+                reward_tensor[i, valid_response_length - 1] = torch.tensor(score, dtype=torch.float32, device=prompt_ids.device)
 
             if data_source not in already_print_data_sources:
                 already_print_data_sources[data_source] = 0

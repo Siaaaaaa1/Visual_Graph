@@ -270,8 +270,8 @@ class TrajectoryCollector:
 
         initial_images = obs.get('image', None)
 
-        lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
-        assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"
+        length_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
+        assert len(gen_batch.batch) == length_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {length_obs}"
         
         if self.config.env.rollout.n > 0:
             uid_batch = []
@@ -407,13 +407,11 @@ class TrajectoryCollector:
             
             think_match = think_pattern.search(final_response)
             action_match = action_pattern.search(final_response)
-            
+
+            # 与 episode.py 保持一致：仅在缺少 think/action 基本结构时施加惩罚
+            # think_content < 50 的检查在两处均不启用，避免训练信号与分析指标不一致
             if not (think_match and action_match):
                 format_penalties[i] = FORMAT_PENALTY_COEF
-            else:
-                think_content = think_match.group(1).strip()
-                if len(think_content) < 50:
-                    format_penalties[i] = FORMAT_PENALTY_COEF
             
             # 将惩罚项注入到最后一个 step 记录中
             total_batch_list[i][-1]['format_penalty'] = format_penalties[i]
@@ -865,44 +863,46 @@ class TrajectoryCollector:
                 return "<BINARY_DATA_FILTERED>" #
             return obj
 
-        output_dir = os.path.join(os.getcwd(), 'test')
-        os.makedirs(output_dir, exist_ok=True)
-        output_file = os.path.join(output_dir, 'guiji.jsonl')
+        # 仅在训练阶段写入轨迹日志，避免验证轨迹混入同一文件
+        if is_train:
+            output_dir = os.path.join(os.getcwd(), 'rollout_logs')
+            os.makedirs(output_dir, exist_ok=True)
+            output_file = os.path.join(output_dir, 'guiji.jsonl')
 
-        non_tensor_data = gen_batch_output.non_tensor_batch
-        if non_tensor_data:
-            all_keys = list(non_tensor_data.keys())
-            batch_size = len(non_tensor_data[all_keys[0]])
-            middle_keys = [k for k in all_keys if k != 'index' and k not in END_KEYS]
-            valid_end_keys = [k for k in END_KEYS if k in all_keys]
+            non_tensor_data = gen_batch_output.non_tensor_batch
+            if non_tensor_data:
+                all_keys = list(non_tensor_data.keys())
+                batch_size = len(non_tensor_data[all_keys[0]])
+                middle_keys = [k for k in all_keys if k != 'index' and k not in END_KEYS]
+                valid_end_keys = [k for k in END_KEYS if k in all_keys]
 
-            last_traj_uid = None
-            step_counter = 0
+                last_traj_uid = None
+                step_counter = 0
 
-            with open(output_file, 'a', encoding='utf-8') as f:
-                for i in range(batch_size):
-                    row = {} 
-                    if 'index' in non_tensor_data:
-                        row['index'] = make_serializable(non_tensor_data['index'][i])
-                    
-                    current_traj_uid = str(non_tensor_data['traj_uid'][i]) if 'traj_uid' in non_tensor_data else "unknown"
-                    if last_traj_uid != current_traj_uid:
-                        step_counter = 0
-                        last_traj_uid = current_traj_uid
-                    else:
-                        step_counter += 1
-                    row['step_in_traj'] = step_counter
+                with open(output_file, 'a', encoding='utf-8') as f:
+                    for i in range(batch_size):
+                        row = {}
+                        if 'index' in non_tensor_data:
+                            row['index'] = make_serializable(non_tensor_data['index'][i])
 
-                    for key in middle_keys:
-                        raw_val = non_tensor_data[key][i]
-                        if key == PARENT_KEY and isinstance(raw_val, dict):
-                            raw_val = {k: v for k, v in raw_val.items() if k not in REMOVE_KEYS}
-                        row[key] = make_serializable(raw_val)
-                    
-                    for key in valid_end_keys:
-                        raw_val = non_tensor_data[key][i]
-                        row[key] = make_serializable(raw_val)
+                        current_traj_uid = str(non_tensor_data['traj_uid'][i]) if 'traj_uid' in non_tensor_data else "unknown"
+                        if last_traj_uid != current_traj_uid:
+                            step_counter = 0
+                            last_traj_uid = current_traj_uid
+                        else:
+                            step_counter += 1
+                        row['step_in_traj'] = step_counter
 
-                    f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
+                        for key in middle_keys:
+                            raw_val = non_tensor_data[key][i]
+                            if key == PARENT_KEY and isinstance(raw_val, dict):
+                                raw_val = {k: v for k, v in raw_val.items() if k not in REMOVE_KEYS}
+                            row[key] = make_serializable(raw_val)
+
+                        for key in valid_end_keys:
+                            raw_val = non_tensor_data[key][i]
+                            row[key] = make_serializable(raw_val)
+
+                        f.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
         
         return gen_batch_output

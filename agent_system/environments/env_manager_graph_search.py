@@ -197,4 +197,5 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             with open(self.current_run_log_file, 'a', encoding='utf-8') as f:
                 f.write(json.dumps(traj_data, ensure_ascii=False) + '\n')
         except Exception as e:
-            pass
+            print(f"[Warning] _save_trajectory_to_disk: failed to write traj for env {env_idx} "
+                  f"(center_id={traj_data.get('center_id', 'unknown')}): {e}")

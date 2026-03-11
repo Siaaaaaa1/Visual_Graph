@@ -1,10 +1,18 @@
 set -x
+# --- 0. 从项目根目录的 .env 加载凭据（需在 Visual_Graph/ 根目录下运行脚本）---
+if [ -f ".env" ]; then
+    set -a; source .env; set +a
+fi
+
+if [ -z "${WANDB_API_KEY}" ]; then
+    echo "错误: WANDB_API_KEY 未设置。请在项目根目录创建 .env 文件并写入 WANDB_API_KEY=your_key"
+    exit 1
+fi
+
 # --- 1. 基础环境设置 ---
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=FLASHINFER
-export VERL_PPO_ASYNC_ROLLOUT=1 
-
-export WANDB_API_KEY="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"
+export VERL_PPO_ASYNC_ROLLOUT=1
 export MASTER_ADDRESS=127.0.0.1
 export WORLD_SIZE=8
 
