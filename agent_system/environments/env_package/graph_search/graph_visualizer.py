@@ -470,7 +470,10 @@ class GraphVisualizer:
                 r = r_dict_other[n]
                 pos[n] = np.array([r * np.cos(angle), r * np.sin(angle)])
 
-        # 4. 节点分类（纯 Python，无 matplotlib，不需要锁）
+        # 4. 边分组 + 节点分类（纯 Python，无 matplotlib，不需要锁）
+        edges_1hop  = [(u, v) for u, v in G.edges() if u == center_id or v == center_id]
+        edges_other = [(u, v) for u, v in G.edges() if u != center_id and v != center_id]
+
         shapes_dict = {"s": [], "o": [], "^": [], "v": [], "*": []}
         shapes_dict["s"].append(center_id)
         shapes_dict["*"].extend([n for n in global_hubs_to_add if n in nodes_to_draw])
