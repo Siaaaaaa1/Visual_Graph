@@ -130,11 +130,11 @@ async def fetch_completion(session: aiohttp.ClientSession, msgs: list, temp: flo
         "stop": ["</action>"]
     }
     async with sem:
-        timeout = aiohttp.ClientTimeout(total=600, connect=60, sock_read=300)
+        timeout = aiohttp.ClientTimeout(total=120, connect=15, sock_read=90)
         async with session.post(API_URL, json=payload, headers=headers, timeout=timeout) as response:
             if response.status != 200:
                 error_text = await response.text()
-                raise RuntimeError(f"HTTP {response.status}: {error_text}")
+                raise RuntimeError(f"HTTP {response.status}: {error_text[:300]}")
             data = await response.json()
             return data["choices"][0]["message"]["content"] + "</action>"
 
@@ -200,10 +200,10 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
 
             messages.append({"role": "user", "content": user_content})
 
-            logger.debug(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — 等待 API 响应...")
+            logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — → API请求中 (msgs={len(messages)}条)...")
             try:
                 ans_text = await fetch_completion(session, messages, current_temp, sem)
-                logger.debug(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — API 返回 {len(ans_text)} 字符")
+                logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — ← API返回 {len(ans_text)} 字符")
             except Exception as e:
                 logger.error(f"Task {tid} API Error: {repr(e)}")
                 api_error = True
@@ -355,6 +355,34 @@ async def main_async():
 
     logger.info(f"🔌 正在验证 DashScope API 连通性... ({API_URL})")
     if not await _check_api_connectivity():
+        return
+
+    # 用真实多模态请求测试（文字+图片），确认 VL 推理链路可用
+    logger.info("🖼️  正在测试多模态 API（含图片）...")
+    try:
+        _dummy_img = np.zeros((64, 64, 3), dtype=np.uint8)
+        _b64 = img_to_b64(_dummy_img)
+        _test_msgs = [{"role": "user", "content": [
+            {"type": "text", "text": "What color is this image?"},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{_b64}"}}
+        ]}]
+        _headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}", "Content-Type": "application/json"}
+        _payload = {"model": "qwen3-vl-plus", "messages": _test_msgs, "max_tokens": 10}
+        _timeout = aiohttp.ClientTimeout(total=30, connect=10, sock_read=20)
+        async with aiohttp.ClientSession() as _s:
+            async with _s.post(API_URL, json=_payload, headers=_headers, timeout=_timeout) as _r:
+                _body = await _r.json()
+                if _r.status == 200:
+                    _reply = _body["choices"][0]["message"]["content"]
+                    logger.info(f"✅ 多模态 API 测试通过，模型回复: {_reply[:80]}")
+                else:
+                    logger.error(f"❌ 多模态 API 返回错误 HTTP {_r.status}: {str(_body)[:300]}")
+                    return
+    except asyncio.TimeoutError:
+        logger.error("❌ 多模态 API 超时（30s），图片推理链路不通，请检查模型名称或网络")
+        return
+    except Exception as _e:
+        logger.error(f"❌ 多模态 API 测试失败: {repr(_e)}")
         return
 
     all_tasks, text_db, shared_payload = prepare_shared_assets(args.dataset, args.dataset_dir)
