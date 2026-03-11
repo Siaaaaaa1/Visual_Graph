@@ -205,7 +205,9 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
             logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — → API请求中 (msgs={len(messages)}条)...")
             try:
                 ans_text = await fetch_completion(session, messages, current_temp, sem)
-                logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — ← API返回 {len(ans_text)} 字符")
+                # 打印 API 返回内容（截取前 300 字符，避免 base64 图片膨胀日志）
+                preview = ans_text.replace("\n", " ")[:300]
+                logger.info(f"[Task {tid}] attempt={attempt_idx} step={step_idx} — ← API返回 ({len(ans_text)}字符): {preview}")
             except Exception as e:
                 logger.error(f"Task {tid} API Error: {repr(e)}")
                 api_error = True
