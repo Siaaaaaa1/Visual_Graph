@@ -55,13 +55,16 @@ TARGET_SUCCESS_COUNT = 3
 
 os.makedirs("distill", exist_ok=True)
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.FileHandler(f"distill/distill_vgraph_{args.dataset}.log", mode='a'),
         logging.StreamHandler(sys.stdout)
     ]
 )
+# 避免 aiohttp/asyncio 等库的 DEBUG 日志干扰
+logging.getLogger("aiohttp").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # 并发控制：针对 qwen-vl-max 建议保持在 8-10 左右
@@ -154,6 +157,8 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
     last_attempt_steps = []   # 最后一次尝试的完整步骤，供 debug 用
     last_failure_type = "no_correct_answer"
     actual_attempts = 0
+
+    logger.debug(f"[Task {tid}] 开始执行，answer={task['answer']}")
 
     for attempt_idx in range(1, max_attempts + 1):
         actual_attempts = attempt_idx
@@ -312,9 +317,39 @@ def _save_sample_images(training_data_path: str, dataset_name: str, n: int = 5):
 
 
 # ================= 9. 异步主函数 =================
+async def _check_api_connectivity():
+    """启动前快速验证 DashScope API 是否可达，失败直接报错退出"""
+    test_payload = {
+        "model": "qwen3-vl-plus",
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+    }
+    headers = {"Authorization": f"Bearer {DASHSCOPE_API_KEY}", "Content-Type": "application/json"}
+    timeout = aiohttp.ClientTimeout(total=15, connect=10)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(API_URL, json=test_payload, headers=headers, timeout=timeout) as resp:
+                if resp.status in (200, 400):  # 400 也说明服务可达（参数问题）
+                    logger.info(f"✅ DashScope API 连通性验证通过 (HTTP {resp.status})")
+                    return True
+                text = await resp.text()
+                logger.error(f"❌ DashScope API 返回异常: HTTP {resp.status} — {text[:200]}")
+                return False
+    except asyncio.TimeoutError:
+        logger.error("❌ DashScope API 连接超时（10s），请检查网络或 DASHSCOPE_BASE_URL 是否正确")
+        return False
+    except Exception as e:
+        logger.error(f"❌ DashScope API 连通性检查失败: {repr(e)}")
+        return False
+
+
 async def main_async():
     if not DASHSCOPE_API_KEY:
         logger.error("DASHSCOPE_API_KEY 缺失！")
+        return
+
+    logger.info(f"🔌 正在验证 DashScope API 连通性... ({API_URL})")
+    if not await _check_api_connectivity():
         return
 
     all_tasks, text_db, shared_payload = prepare_shared_assets(args.dataset, args.dataset_dir)
