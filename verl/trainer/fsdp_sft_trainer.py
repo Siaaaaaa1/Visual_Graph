@@ -43,6 +43,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 import verl.utils.hdfs_io as hdfs_io
 from verl.utils.dataset import SFTDataset
 from verl.utils.dataset.multiturn_sft_dataset import MultiTurnSFTDataset
+from verl.utils.dataset.multiturn_vlm_sft_dataset import MultiTurnVLMSFTDataset
 from verl.utils.debug import log_gpu_memory_usage
 from verl.utils.distributed import initialize_global_process_group
 from verl.utils.fs import copy_to_local
@@ -190,13 +191,25 @@ class FSDPSFTTrainer:
         init_context = get_init_weight_context_manager(use_meta_tensor=not config.tie_word_embeddings, mesh=self.device_mesh)
 
         with init_context():
-            self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
-                local_model_path,
-                config=config,
-                torch_dtype=torch.float32,
-                attn_implementation="flash_attention_2",
-                trust_remote_code=trust_remote_code,
-            )
+            # For VLMs (e.g. Qwen3-VL) we must use AutoModelForVision2Seq so that
+            # the visual encoder is loaded.  Set config.model.is_vlm = true to opt in.
+            if self.config.model.get("is_vlm", False):
+                from transformers import AutoModelForVision2Seq
+                self.model: PreTrainedModel = AutoModelForVision2Seq.from_pretrained(
+                    local_model_path,
+                    config=config,
+                    torch_dtype=torch.float32,
+                    attn_implementation="flash_attention_2",
+                    trust_remote_code=trust_remote_code,
+                )
+            else:
+                self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
+                    local_model_path,
+                    config=config,
+                    torch_dtype=torch.float32,
+                    attn_implementation="flash_attention_2",
+                    trust_remote_code=trust_remote_code,
+                )
 
             if self.use_remove_padding or self.config.ulysses_sequence_parallel_size > 1:
                 from verl.models.transformers.monkey_patch import apply_monkey_patch
@@ -311,19 +324,44 @@ class FSDPSFTTrainer:
         loss_mask = batch.pop("loss_mask")[:, :-1].reshape(-1).to(self.device_name)
         loss_fct = nn.CrossEntropyLoss(reduction="none")
 
+        # ── VLM inputs (optional) ───────────────────────────────────────
+        # DataLoader collates (3, seq_len) → (batch, 3, seq_len).
+        # Qwen3-VL / Qwen2-VL expect (3, batch, seq_len), so permute.
+        if position_ids.dim() == 3:
+            position_ids = position_ids.permute(1, 0, 2)  # (3, batch, seq_len)
+
+        pixel_values   = None
+        image_grid_thw = None
+        if "pixel_values" in batch.keys():
+            pixel_values = batch["pixel_values"].to(self.device_name)
+            # Collated shape: (batch, n_patches, patch_dim) → flatten batch dim
+            pixel_values = pixel_values.flatten(0, 1)                          # (batch*n_patches, patch_dim)
+        if "image_grid_thw" in batch.keys():
+            image_grid_thw = batch["image_grid_thw"].to(self.device_name)
+            # Collated shape: (batch, 1, 3) → (batch, 3)
+            image_grid_thw = image_grid_thw.flatten(0, 1)                      # (batch, 3)
+
         # Context manager for sequence parallel if needed
         context = self.sharding_manager if use_sp else nullcontext()
         with context, torch.autocast(device_type=self.device_name, dtype=torch.bfloat16):
             if not use_sp:
                 # Standard forward pass without sequence parallel
                 labels = input_ids[:, 1:].contiguous()
-                output = self.fsdp_model(input_ids=input_ids, attention_mask=attention_mask, position_ids=position_ids, use_cache=False)
+                output = self.fsdp_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=position_ids,
+                    pixel_values=pixel_values,
+                    image_grid_thw=image_grid_thw,
+                    use_cache=False,
+                )
                 logits = output.logits
 
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = labels.contiguous()
                 # Flatten the tokens
-                shift_logits = shift_logits.view(-1, self.model.config.vocab_size)
+                vocab_size = getattr(self.model.config, "vocab_size", None) or self.model.config.text_config.vocab_size
+                shift_logits = shift_logits.view(-1, vocab_size)
                 shift_labels = shift_labels.view(-1)
                 # Enable model parallelism
                 shift_labels = shift_labels.to(shift_logits.device)
@@ -351,11 +389,13 @@ class FSDPSFTTrainer:
                 input_ids_rmpad_rolled, _, _ = ulysses_pad_and_slice_inputs(input_ids_rmpad_rolled, None, get_ulysses_sequence_parallel_world_size())
                 input_ids_rmpad_rolled = input_ids_rmpad_rolled.squeeze(0)  # ((total_nnz / sp) + pad)
 
-                # Forward pass
+                # Forward pass (SP does not support VLM inputs; pixel_values must be None)
                 output = self.fsdp_model(
                     input_ids=input_ids_rmpad_sliced,
                     attention_mask=None,  # Not needed with flash attention varlen
                     position_ids=position_ids_rmpad_padded,
+                    pixel_values=pixel_values,
+                    image_grid_thw=image_grid_thw,
                     use_cache=False,
                 )
 
@@ -574,7 +614,15 @@ def main(config):
     from verl.utils import hf_tokenizer
 
     local_model_path = copy_to_local(src=config.model.partial_pretrain, verbose=True)
-    tokenizer = hf_tokenizer(local_model_path, trust_remote_code=config.model.trust_remote_code)
+
+    # For VLM training, use the full processor (tokenizer + image processor).
+    # Controlled by config.data.multiturn.vlm_mode = true
+    if config.data.get("multiturn", {}).get("vlm_mode", False):
+        from transformers import AutoProcessor
+        tokenizer = AutoProcessor.from_pretrained(local_model_path, trust_remote_code=config.model.trust_remote_code)
+    else:
+        tokenizer = hf_tokenizer(local_model_path, trust_remote_code=config.model.trust_remote_code)
+
     train_dataset = create_sft_dataset(config.data.train_files, config.data, tokenizer)
     val_dataset = create_sft_dataset(config.data.val_files, config.data, tokenizer)
 
@@ -591,7 +639,10 @@ def create_sft_dataset(data_paths, data_config, tokenizer):
         from verl.utils.import_utils import load_extern_type
 
         dataset_cls = load_extern_type(data_config.custom_cls.path, data_config.custom_cls.name)
-    # Then check if multi-turn dataset should be used
+    # VLM multi-turn dataset (images + text, e.g. Qwen3-VL SFT)
+    elif data_config.get("multiturn", {}).get("vlm_mode", False):
+        dataset_cls = MultiTurnVLMSFTDataset
+    # Text-only multi-turn dataset
     elif data_config.get("multiturn", {}).get("enable", False):
         dataset_cls = MultiTurnSFTDataset
     # Default to single-turn dataset

@@ -13,7 +13,6 @@ import asyncio
 import aiohttp
 from PIL import Image
 from io import BytesIO
-from tqdm.asyncio import tqdm
 from concurrent.futures import ThreadPoolExecutor
 import re
 import random
@@ -51,10 +50,7 @@ parser.add_argument("--max_attempts", type=int, default=15,
                     help="每个节点的最大总尝试次数。超过后若仍无成功则放弃，并写入 debug 文件。")
 args = parser.parse_args()
 
-# 蒸馏门控常量
 INITIAL_MAX_ATTEMPTS = 5
-EXTENDED_MAX_ATTEMPTS = 15
-TARGET_SUCCESS_COUNT = 3
 
 os.makedirs("distill", exist_ok=True)
 logging.basicConfig(

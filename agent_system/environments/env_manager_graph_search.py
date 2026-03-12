@@ -136,12 +136,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
             if i not in self.episode_trajectories:
                 continue
             self.conversations[i].append({"role": "assistant", "content": act_text})
-            
-            if i in self.episode_trajectories:
-                step_num = len(self.episode_trajectories[i]['steps']) + 1
-            else:
-                step_num = "N/A (Finished)"
-                
+            step_num = len(self.episode_trajectories[i]['steps']) + 1
             feedback_content = f"=== Step {step_num} Environment Feedback ===\n{next_text_obs[i]}"
             self.conversations[i].append({"role": "user", "content": feedback_content})
 
@@ -183,6 +178,7 @@ class GraphSearchEnvironmentManager(EnvironmentManagerBase):
                     self.episode_trajectories[i]["won"] = info.get("won", False)
                     self.episode_trajectories[i]["failure_reason"] = info.get("failure_reason", "Unknown")
                     self._save_trajectory_to_disk(i)
+                    self.conversations[i] = []  # free memory after episode ends
 
         return next_observations, to_numpy(rewards), to_numpy(dones), infos
 
