@@ -50,7 +50,7 @@ parser.add_argument("--max_attempts", type=int, default=15,
                     help="每个节点的最大总尝试次数。超过后若仍无成功则放弃，并写入 debug 文件。")
 args = parser.parse_args()
 
-INITIAL_MAX_ATTEMPTS = 5
+INITIAL_MAX_ATTEMPTS = 8
 
 os.makedirs("distill", exist_ok=True)
 logging.basicConfig(
@@ -192,7 +192,7 @@ async def run_task_async(task, text_db, shared_payload, session, sem, executor,
     for attempt_idx in range(1, max_attempts + 1):
         actual_attempts = attempt_idx
 
-        # 门控：前 INITIAL_MAX_ATTEMPTS 次结束后仍 0 成功 → 提前放弃（困难节点耗尽探索预算）
+        # 门控：前 INITIAL_MAX_ATTEMPTS 次结束后仍 0 成功 → 提前放弃
         if attempt_idx > INITIAL_MAX_ATTEMPTS and len(collected_trajectories) == 0:
             last_failure_type = "gated_out_no_early_success"
             break
@@ -500,6 +500,7 @@ async def main_async():
             "node_class":       node_class,
             "difficulty_score": difficulty_score,
             "is_hard":          is_hard,
+            "num_steps":        len(entry["traj"]),
             "messages":         sft_messages,
         }
         # images list contains one base64-encoded JPEG string for the graph view

@@ -44,13 +44,14 @@ class GraphSearchEnv:
             self.valid_nodes_in_view.add(int(real_id))
             
         center_raw_text = self.node_text_db.get(str(self.center_id), "Title: Unknown\nAbstract: None")
-        center_title, _ = self._get_title_and_abstract(center_raw_text)
-        
-        proxy_data = self.visualizer._get_node_info(self.center_id).get("proxy_info", {})
-        center_proxy = proxy_data.get("ranked_labels", ["Unknown"])
+        center_title, center_abstract = self._get_title_and_abstract(center_raw_text)
+
+        center_deg = self.visualizer.get_node_degree_info(self.center_id)
+        center_in_deg  = center_deg["in_degree"]
+        center_out_deg = center_deg["out_degree"]
 
         candidates_str = ", ".join(all_classes)
-        
+
         # Build anchor intelligence text
         anchor_str_lines = []
         for nid, cls_name in anchor_mapping.items():
@@ -59,14 +60,20 @@ class GraphSearchEnv:
 
         obs = (
             f"Task: Predict the correct category of the center node **{self.center_id}**.\n\n"
-            f"[Center Node Prior]\n"
-            f"* {center_title}\n"
-            f"[Visual View]\n"
-            f"The graph shows a concentric-ring radar layout of the local neighborhood.\n"
+            f"[Center Node Information]\n"
+            f"* Title: {center_title}\n"
+            f"* Abstract: {center_abstract}\n"
+            f"* In-degree: {center_in_deg} | Out-degree: {center_out_deg}\n"
+            f"\n[Visual View]\n"
+            f"The attached image shows a concentric-ring radar layout of the local neighborhood.\n"
+            f"Analyze it carefully: observe which 1-hop nodes are red (high similarity) or blue (low similarity),\n"
+            f"identify hub shapes (▲ ▼), and note the ★ macro anchor positions.\n"
             f"★ **Macro Anchor Intelligence** ★: Star-shaped nodes (★) at the graph boundary are category representatives:\n"
             f"{anchor_bullet_points}\n\n"
-            f"Think freely, then call an action. Query action: `<action>check_nodes([ID1, ID2, ...])</action>`.\n"
-            f"Note: at most 5 IDs per action call.\n\n"
+            f"Step 1 — Analyze the center node's own text and the visual topology above.\n"
+            f"Step 2 — Query high-value neighbor nodes to gather supporting evidence.\n"
+            f"Step 3 — When evidence is sufficient, submit: `<action>final(Category)</action>`.\n"
+            f"Query action: `<action>check_nodes([ID1, ID2, ...])</action>` (at most 5 IDs per call).\n\n"
             f"Candidate categories: [{candidates_str}]\n"
         )
 
