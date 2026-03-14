@@ -55,6 +55,7 @@ print(f"测试集: {len(test_slim)} 条 → ${TEST_FILE}")
 EOF
 
 echo "[${DATASET}] 启动 SFT 训练（含早停监控）..."
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python distill/early_stop_monitor.py --patience 3 --min_delta 0.001 -- \
     torchrun --standalone --nnodes=1 --nproc_per_node=8 \
         -m verl.trainer.fsdp_sft_trainer \
@@ -63,11 +64,14 @@ python distill/early_stop_monitor.py --patience 3 --min_delta 0.001 -- \
         data.test_files="[${TEST_FILE}]" \
         data.multiturn.enable=true \
         data.multiturn.messages_key=messages \
-        data.micro_batch_size_per_gpu=2 \
+        data.train_batch_size=64 \
+        data.micro_batch_size_per_gpu=1 \
         data.max_length=8192 \
         data.truncation=right \
+        use_remove_padding=True \
         model.partial_pretrain=./models/Qwen3-VL-4B-Instruct \
         model.is_vlm=true \
+        model.enable_gradient_checkpointing=true \
         trainer.default_local_dir=./checkpoints/sft_${DATASET} \
         trainer.project_name=graph-search-distill \
         trainer.experiment_name=sft-${DATASET} \
