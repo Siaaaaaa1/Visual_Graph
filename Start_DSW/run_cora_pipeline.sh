@@ -20,15 +20,19 @@ if [ -z "${DASHSCOPE_API_KEY}" ]; then echo "[ERROR] DASHSCOPE_API_KEY 未设置
 # ==========================================
 # 1. 蒸馏阶段
 # ==========================================
-echo "[INFO] 步骤 1/3: 开始数据蒸馏（hard=不限, easy/class=100）..."
-python distill/distill_data.py \
-    --dataset ${DATASET} \
-    --num_tasks 100000 \
-    --dataset_dir datasets \
-    --max_hard_per_class 0 \
-    --max_easy_per_class 100 \
-    --trajectories_per_node 3 \
-    --max_attempts 15
+if [ -f "distill/${DATASET}_vgraph_training.parquet" ]; then
+    echo "[INFO] 步骤 1/3: 已有蒸馏数据，跳过蒸馏。"
+else
+    echo "[INFO] 步骤 1/3: 开始数据蒸馏（hard=不限, easy/class=100）..."
+    python distill/distill_data.py \
+        --dataset ${DATASET} \
+        --num_tasks 100000 \
+        --dataset_dir datasets \
+        --max_hard_per_class 0 \
+        --max_easy_per_class 100 \
+        --trajectories_per_node 3 \
+        --max_attempts 15
+fi
 
 # ==========================================
 # 2. SFT 阶段
