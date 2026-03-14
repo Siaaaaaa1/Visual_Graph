@@ -4,6 +4,9 @@
 
 set -eo pipefail
 
+source /mnt/workspace/haowengao/miniconda3/bin/activate verl-agent
+cd /mnt/workspace/haowengao/Visual_Graph
+
 DATASET="cora"
 
 echo "========================================================"
