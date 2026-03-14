@@ -54,6 +54,8 @@ trainer:
   experiment_name: test
   total_epochs: 4
   total_training_steps: null
+  save_freq: 50
+  test_freq: 50
   logger: ['console']
   seed: 1
 
