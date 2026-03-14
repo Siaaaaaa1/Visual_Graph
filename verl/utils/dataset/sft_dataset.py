@@ -18,6 +18,7 @@ SFT dataset
 Each parquet file contains
 """
 
+import logging
 from typing import List, Union
 
 import pandas as pd
@@ -28,6 +29,8 @@ from transformers import PreTrainedTokenizer
 from verl.utils import hf_tokenizer
 from verl.utils.fs import copy_to_local
 from verl.utils.model import compute_position_id_with_mask
+
+logger = logging.getLogger(__name__)
 
 
 class SFTDataset(Dataset):
@@ -154,9 +157,19 @@ class SFTDataset(Dataset):
         elif sequence_length > self.max_length:
             if self.truncation == "left":
                 # actually, left truncation may not be reasonable
+                logger.warning(
+                    "[TRUNCATION] sample %d: seq_len=%d > max_length=%d, left-truncating (prompt_len=%d, response_len=%d)",
+                    item, sequence_length, self.max_length, prompt_length, response_length,
+                )
                 input_ids = input_ids[-self.max_length :]
                 attention_mask = attention_mask[-self.max_length :]
             elif self.truncation == "right":
+                logger.warning(
+                    "[TRUNCATION] sample %d: seq_len=%d > max_length=%d, right-truncating %d tokens"
+                    " (prompt_len=%d, response_len=%d)",
+                    item, sequence_length, self.max_length, sequence_length - self.max_length,
+                    prompt_length, response_length,
+                )
                 input_ids = input_ids[: self.max_length]
                 attention_mask = attention_mask[: self.max_length]
             elif self.truncation == "error":
