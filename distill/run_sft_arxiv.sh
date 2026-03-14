@@ -55,7 +55,7 @@ python distill/early_stop_monitor.py --patience 3 --min_delta 0.001 -- \
         data.val_files="[${VAL_FILE}]" \
         data.prompt_key=messages \
         data.micro_batch_size_per_gpu=2 \
-        data.max_length=4096 \
+        data.max_length=8192 \
         data.truncation=right \
         model.partial_pretrain=./models/Qwen3-VL-4B-Instruct \
         trainer.default_local_dir=./checkpoints/sft_${DATASET} \
