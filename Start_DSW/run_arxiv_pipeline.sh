@@ -1,5 +1,5 @@
 #!/bin/bash
-# Pipeline: SFT -> RL (arxiv 数据集，4 GPU)
+# Pipeline: Distill -> SFT -> RL (arxiv 数据集，8 GPU)
 # 用法: bash Start_DSW/run_arxiv_pipeline.sh（需在 Visual_Graph/ 根目录运行）
 
 set -eo pipefail
@@ -7,20 +7,34 @@ set -eo pipefail
 DATASET="arxiv"
 
 echo "========================================================"
-echo "[${DATASET}] 开始 SFT -> RL 全链路训练"
+echo "[${DATASET}] 开始 Distill -> SFT -> RL 全链路训练"
 echo "========================================================"
 
 if [ -f ".env" ]; then set -a; source .env; set +a; fi
 if [ -z "${WANDB_API_KEY}" ]; then echo "[ERROR] WANDB_API_KEY 未设置"; exit 1; fi
+if [ -z "${DASHSCOPE_API_KEY}" ]; then echo "[ERROR] DASHSCOPE_API_KEY 未设置"; exit 1; fi
 
 # ==========================================
-# 1. SFT 阶段
+# 1. 蒸馏阶段
 # ==========================================
-echo "[INFO] 步骤 1/2: 开始 SFT 训练..."
+echo "[INFO] 步骤 1/3: 开始数据蒸馏（hard=不限, easy/class=200）..."
+python distill/distill_data.py \
+    --dataset ${DATASET} \
+    --num_tasks 100000 \
+    --dataset_dir datasets \
+    --max_hard_per_class 0 \
+    --max_easy_per_class 200 \
+    --trajectories_per_node 3 \
+    --max_attempts 15
+
+# ==========================================
+# 2. SFT 阶段
+# ==========================================
+echo "[INFO] 步骤 2/3: 开始 SFT 训练..."
 bash distill/run_sft_${DATASET}.sh
 
 # ==========================================
-# 2. 查找最新 SFT checkpoint
+# 3. 查找最新 SFT checkpoint
 # ==========================================
 SFT_CKPT=$(ls -d ./checkpoints/sft_${DATASET}/global_step_* 2>/dev/null | sort -V | tail -1)
 if [ -z "${SFT_CKPT}" ]; then
@@ -32,7 +46,7 @@ echo "[INFO] 使用 SFT checkpoint: ${SFT_CKPT}"
 # ==========================================
 # 3. RL 阶段（接续 SFT 权重）
 # ==========================================
-echo "[INFO] 步骤 2/2: 开始 RL 训练（GRPO）..."
+echo "[INFO] 步骤 3/3: 开始 RL 训练（GRPO）..."
 
 export VLLM_USE_V1=1
 export VLLM_ATTENTION_BACKEND=FLASHINFER
