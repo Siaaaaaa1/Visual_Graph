@@ -81,8 +81,21 @@ class MultiTurnSFTDataset(Dataset):
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
 
+        def parse_messages(val):
+            """确保 messages 是 list[dict] 格式，兼容 JSON 字符串和 pyarrow StructScalar。"""
+            import json
+            val = series_to_item(val)
+            if isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except Exception:
+                    val = [{"role": "user", "content": val}]
+            if isinstance(val, list):
+                return [dict(m) if not isinstance(m, dict) else m for m in val]
+            return val
+
         # Extract messages list from dataframe
-        self.messages = self.dataframe[self.messages_key].apply(series_to_item).tolist()
+        self.messages = self.dataframe[self.messages_key].apply(parse_messages).tolist()
 
     def __len__(self):
         return len(self.messages)

@@ -555,6 +555,8 @@ class FSDPSFTTrainer:
             )
 
         global_step = 0
+        best_val_loss = float("inf")
+        best_ckpt_step = None
         # compute the total training steps.
         # the total training steps in SFT is mainly for early exit
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
@@ -606,9 +608,9 @@ class FSDPSFTTrainer:
                 data = TensorDict(data, batch_size=self.config.data.micro_batch_size_per_gpu).to(self.device_name)
                 val_loss = self.validation_step(data)
                 val_losses.append(val_loss)
+            val_loss_tensor = torch.mean(torch.stack(val_losses))
             if rank == 0:
-                val_loss = torch.mean(torch.stack(val_losses))
-                metric = {"val/loss": val_loss.detach().item()}
+                metric = {"val/loss": val_loss_tensor.detach().item()}
                 tracking.log(data=metric, step=global_step)
             torch.distributed.barrier()
 
@@ -627,6 +629,19 @@ class FSDPSFTTrainer:
 
             # save checkpoint
             self.save_checkpoint(step=global_step)
+
+            # track best checkpoint by val loss
+            current_val_loss = val_loss_tensor.item()
+            if current_val_loss < best_val_loss:
+                best_val_loss = current_val_loss
+                best_ckpt_step = global_step
+                if rank == 0:
+                    ckpt_path = os.path.join(self.config.trainer.default_local_dir, f"global_step_{global_step}")
+                    best_ckpt_file = os.path.join(self.config.trainer.default_local_dir, "best_checkpoint.txt")
+                    with open(best_ckpt_file, "w") as f:
+                        f.write(ckpt_path)
+                    print(f"[BestCkpt] New best val_loss={best_val_loss:.4f} at step {global_step} → {ckpt_path}")
+            torch.distributed.barrier()
 
 
 @hydra.main(config_path="config", config_name="sft_trainer", version_base=None)

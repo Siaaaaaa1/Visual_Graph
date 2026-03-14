@@ -59,10 +59,9 @@ test_slim.to_parquet("${TEST_FILE}", index=False)
 print(f"测试集: {len(test_slim)} 条 → ${TEST_FILE}")
 EOF
 
-echo "[${DATASET}] 启动 SFT 训练（含早停监控）..."
+echo "[${DATASET}] 启动 SFT 训练（全量训练，自动记录最优 checkpoint）..."
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-python distill/early_stop_monitor.py --patience 3 --min_delta 0.001 -- \
-    torchrun --standalone --nnodes=1 --nproc_per_node=8 \
+torchrun --standalone --nnodes=1 --nproc_per_node=8 \
         -m verl.trainer.fsdp_sft_trainer \
         data.train_files="[${PROCESSED}]" \
         data.val_files="[${VAL_FILE}]" \
