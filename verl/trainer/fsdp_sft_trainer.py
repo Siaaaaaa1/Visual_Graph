@@ -208,11 +208,11 @@ class FSDPSFTTrainer:
             # For VLMs (e.g. Qwen3-VL) we must use AutoModelForVision2Seq so that
             # the visual encoder is loaded.  Set config.model.is_vlm = true to opt in.
             if self.config.model.get("is_vlm", False):
-                from transformers import AutoModelForVision2Seq
-                self.model: PreTrainedModel = AutoModelForVision2Seq.from_pretrained(
+                from transformers import AutoModelForImageTextToText
+                self.model: PreTrainedModel = AutoModelForImageTextToText.from_pretrained(
                     local_model_path,
                     config=config,
-                    torch_dtype=torch.float32,
+                    dtype=torch.bfloat16,
                     attn_implementation="flash_attention_2",
                     trust_remote_code=trust_remote_code,
                 )
@@ -220,7 +220,7 @@ class FSDPSFTTrainer:
                 self.model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(
                     local_model_path,
                     config=config,
-                    torch_dtype=torch.float32,
+                    dtype=torch.bfloat16,
                     attn_implementation="flash_attention_2",
                     trust_remote_code=trust_remote_code,
                 )
