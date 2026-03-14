@@ -42,8 +42,17 @@ class MultiTurnSFTDataset(Dataset):
 
         assert self.truncation in ["error", "left", "right"]
 
-        if not isinstance(parquet_files, List):
+        try:
+            from omegaconf import OmegaConf
+            if not isinstance(parquet_files, (str, list)):
+                parquet_files = OmegaConf.to_container(parquet_files, resolve=True)
+        except Exception:
+            pass
+
+        if isinstance(parquet_files, str):
             parquet_files = [parquet_files]
+        elif not isinstance(parquet_files, list):
+            parquet_files = list(parquet_files)
 
         self.parquet_files = parquet_files
         if isinstance(tokenizer, str):

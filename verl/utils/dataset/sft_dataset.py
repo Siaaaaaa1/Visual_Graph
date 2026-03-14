@@ -54,8 +54,18 @@ class SFTDataset(Dataset):
         self.truncation = truncation
         self.use_shm = use_shm
 
-        if not isinstance(parquet_files, List):
+        # 将 OmegaConf ListConfig/DictConfig 递归转换为原生 Python 类型
+        try:
+            from omegaconf import OmegaConf
+            if not isinstance(parquet_files, (str, list)):
+                parquet_files = OmegaConf.to_container(parquet_files, resolve=True)
+        except Exception:
+            pass
+
+        if isinstance(parquet_files, str):
             parquet_files = [parquet_files]
+        elif not isinstance(parquet_files, list):
+            parquet_files = list(parquet_files)
 
         self.parquet_files = parquet_files
         if isinstance(tokenizer, str):
