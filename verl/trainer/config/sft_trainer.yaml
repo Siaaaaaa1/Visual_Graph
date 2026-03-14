@@ -30,6 +30,7 @@ model:
     cpu_offload: False
     offload_params: False
   external_lib: null
+  is_vlm: False
   enable_gradient_checkpointing: False
   trust_remote_code: False
   lora_rank: 0  # Set to positive value to enable LoRA (e.g., 32)
