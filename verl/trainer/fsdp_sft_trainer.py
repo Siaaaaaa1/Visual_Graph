@@ -86,7 +86,7 @@ def extract_step(path):
 
 
 class FSDPSFTTrainer:
-    def __init__(self, config, device_mesh: DeviceMesh, ulysses_device_mesh: DeviceMesh, tokenizer, train_dataset: Dataset, val_dataset: Dataset):
+    def __init__(self, config, device_mesh: DeviceMesh, ulysses_device_mesh: DeviceMesh, tokenizer, train_dataset: Dataset, val_dataset: Dataset, test_dataset: Dataset = None):
         self.config = config
         self.device_mesh = device_mesh
         self.ulysses_device_mesh = ulysses_device_mesh
@@ -105,7 +105,7 @@ class FSDPSFTTrainer:
             print(f"Using sequence parallel size: {self.config.ulysses_sequence_parallel_size}")
             print(f"Using remove padding: {self.use_remove_padding}")
 
-        self._build_dataloader(train_dataset, val_dataset)
+        self._build_dataloader(train_dataset, val_dataset, test_dataset)
         # build model
         self._build_model_optimizer()
 
@@ -125,10 +125,11 @@ class FSDPSFTTrainer:
 
         assert self.config.data.train_batch_size % self.config.data.micro_batch_size_per_gpu == 0
 
-    def _build_dataloader(self, train_dataset, val_dataset):
+    def _build_dataloader(self, train_dataset, val_dataset, test_dataset=None):
         # build dataset
         config = self.config
         self.train_dataset, self.val_dataset = train_dataset, val_dataset
+        self.test_dataset = test_dataset
 
         # build dataloader
         # Use data parallel rank and size instead of global rank and world size
@@ -165,6 +166,19 @@ class FSDPSFTTrainer:
             pin_memory=True,
             drop_last=True,
         )
+
+        if self.test_dataset is not None:
+            self.test_sampler = DistributedSampler(self.test_dataset, shuffle=False, num_replicas=world_size, rank=rank, drop_last=True)
+            self.test_dataloader = DataLoader(
+                dataset=self.test_dataset,
+                batch_size=config.data.micro_batch_size_per_gpu,
+                sampler=self.test_sampler,
+                num_workers=8,
+                pin_memory=True,
+                drop_last=True,
+            )
+        else:
+            self.test_dataloader = None
 
     def _build_model_optimizer(self):
         # TODO (zhangchi.usc1992):
@@ -598,6 +612,19 @@ class FSDPSFTTrainer:
                 tracking.log(data=metric, step=global_step)
             torch.distributed.barrier()
 
+            # test evaluation
+            if self.test_dataloader is not None:
+                test_losses = []
+                for data in self.test_dataloader:
+                    data = TensorDict(data, batch_size=self.config.data.micro_batch_size_per_gpu).to(self.device_name)
+                    test_loss = self.validation_step(data)
+                    test_losses.append(test_loss)
+                if rank == 0:
+                    test_loss = torch.mean(torch.stack(test_losses))
+                    metric = {"test/loss": test_loss.detach().item()}
+                    tracking.log(data=metric, step=global_step)
+                torch.distributed.barrier()
+
             # save checkpoint
             self.save_checkpoint(step=global_step)
 
@@ -625,8 +652,10 @@ def main(config):
 
     train_dataset = create_sft_dataset(config.data.train_files, config.data, tokenizer)
     val_dataset = create_sft_dataset(config.data.val_files, config.data, tokenizer)
+    test_files = config.data.get("test_files", None)
+    test_dataset = create_sft_dataset(test_files, config.data, tokenizer) if test_files is not None else None
 
-    trainer = FSDPSFTTrainer(config=config, device_mesh=device_mesh, ulysses_device_mesh=ulysses_device_mesh, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=val_dataset)
+    trainer = FSDPSFTTrainer(config=config, device_mesh=device_mesh, ulysses_device_mesh=ulysses_device_mesh, tokenizer=tokenizer, train_dataset=train_dataset, val_dataset=val_dataset, test_dataset=test_dataset)
 
     trainer.fit()
 

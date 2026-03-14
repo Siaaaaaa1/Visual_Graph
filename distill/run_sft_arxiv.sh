@@ -8,8 +8,9 @@
 set -e
 DATASET="arxiv"
 PARQUET="distill/${DATASET}_vgraph_training.parquet"
-VAL_FILE="datasets/${DATASET}_test_slim.parquet"
 PROCESSED="/tmp/${DATASET}_sft_ready.parquet"
+VAL_FILE="/tmp/${DATASET}_sft_val.parquet"
+TEST_FILE="/tmp/${DATASET}_sft_test.parquet"
 
 EASY_RATIO=${EASY_RATIO:-0.5}   # 覆盖示例: EASY_RATIO=1.0 bash distill/run_sft_arxiv.sh
 
@@ -41,10 +42,21 @@ easy_target = math.ceil(len(hard) * ${EASY_RATIO})
 easy_sampled = easy.sample(n=min(easy_target, len(easy)), random_state=42)
 
 balanced = pd.concat([hard, easy_sampled]).sample(frac=1, random_state=42).reset_index(drop=True)
-balanced.to_parquet("${PROCESSED}", index=False)
-print(f"最终训练集: {len(balanced)} 条")
-print(f"  困难: {len(hard)} ({len(hard)/len(balanced)*100:.1f}%)")
-print(f"  简单: {len(easy_sampled)} ({len(easy_sampled)/len(balanced)*100:.1f}%)")
+
+# 9:1 分为 train / val
+val_size = max(1, int(len(balanced) * 0.1))
+val_df = balanced.iloc[:val_size]
+train_df = balanced.iloc[val_size:]
+train_df.to_parquet("${PROCESSED}", index=False)
+val_df.to_parquet("${VAL_FILE}", index=False)
+print(f"训练集: {len(train_df)} 条（困难 {len(hard)} 简单 {len(easy_sampled)}）")
+print(f"验证集: {len(val_df)} 条 → ${VAL_FILE}")
+
+# 构建 test 文件：读 test_slim，将 prompt 列复制为 messages 列
+test_slim = pd.read_parquet("datasets/${DATASET}_test_slim.parquet")
+test_slim["messages"] = test_slim["prompt"]
+test_slim.to_parquet("${TEST_FILE}", index=False)
+print(f"测试集: {len(test_slim)} 条 → ${TEST_FILE}")
 EOF
 
 echo "[${DATASET}] 启动 SFT 训练（含早停监控）..."
@@ -53,6 +65,7 @@ python distill/early_stop_monitor.py --patience 3 --min_delta 0.001 -- \
         -m verl.trainer.fsdp_sft_trainer \
         data.train_files="[${PROCESSED}]" \
         data.val_files="[${VAL_FILE}]" \
+        data.test_files="[${TEST_FILE}]" \
         data.multiturn.enable=true \
         data.multiturn.messages_key=messages \
         data.micro_batch_size_per_gpu=2 \
