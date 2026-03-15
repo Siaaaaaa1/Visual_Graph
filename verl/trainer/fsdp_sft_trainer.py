@@ -573,13 +573,8 @@ class FSDPSFTTrainer:
                     obs_image = np.zeros((768, 768, 3), dtype=np.uint8)
                     env = None
 
-                # Build initial conversation from test_slim system prompt + env obs
-                raw_prompt = row["prompt"]
-                if isinstance(raw_prompt, str):
-                    raw_prompt = json.loads(raw_prompt)
-                all_msgs = list(raw_prompt)
-                sys_msgs = [m for m in all_msgs if m.get("role") == "system"]
-                conv = sys_msgs  # may be empty if no system prompt
+                # Conversation starts fresh from env.reset() obs (prompt col is a placeholder)
+                conv = []
 
                 done = False
                 won = False
