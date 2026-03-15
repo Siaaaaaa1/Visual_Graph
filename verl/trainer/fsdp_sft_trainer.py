@@ -588,7 +588,12 @@ class FSDPSFTTrainer:
                     env = None
 
                 # Conversation starts fresh from env.reset() obs (prompt col is a placeholder)
+                # For VLM: the graph image is shown once in the first user turn via
+                # {"type": "image"} placeholder; subsequent turns are text-only.
+                # images_list tracks PIL images in message order for proc().
                 conv = []
+                images_list = []
+                first_turn = True
 
                 done = False
                 won = False
@@ -604,23 +609,34 @@ class FSDPSFTTrainer:
                     torch.distributed.broadcast(obs_buf, src=0)
                     obs_text = obs_buf.cpu().numpy().tobytes().decode("utf-8")
 
-                    # ── broadcast image from rank 0 ────────────────────────
-                    img_t = torch.from_numpy(obs_image if rank == 0 else np.zeros((768, 768, 3), dtype=np.uint8)).to(self.device_name)
-                    torch.distributed.broadcast(img_t, src=0)
-                    img_np = img_t.cpu().numpy().astype(np.uint8)
-                    img_pil = Image.fromarray(img_np)
-
-                    # Append env obs to conversation (all ranks)
-                    conv.append({"role": "user", "content": obs_text})
+                    # ── broadcast image from rank 0 (first turn only for VLM) ──
+                    if is_vlm and first_turn:
+                        img_t = torch.from_numpy(
+                            obs_image if rank == 0 else np.zeros((768, 768, 3), dtype=np.uint8)
+                        ).to(self.device_name)
+                        torch.distributed.broadcast(img_t, src=0)
+                        img_pil = Image.fromarray(img_t.cpu().numpy().astype(np.uint8))
+                        images_list.append(img_pil)
+                        # First user message: image placeholder + text
+                        conv.append({"role": "user", "content": [
+                            {"type": "image"},
+                            {"type": "text", "text": obs_text},
+                        ]})
+                        first_turn = False
+                    else:
+                        # Subsequent turns: text only
+                        conv.append({"role": "user", "content": obs_text})
 
                     # ── tokenize (all ranks) ───────────────────────────────
+                    # apply_chat_template inserts <|vision_start|>...<|vision_end|>
+                    # tokens for {"type":"image"} entries; proc() matches pixel_values
                     text_prompt = proc.apply_chat_template(
                         conv, add_generation_prompt=True, tokenize=False
                     )
                     if is_vlm:
                         inputs = proc(
                             text=text_prompt,
-                            images=[img_pil],
+                            images=images_list if images_list else None,
                             return_tensors="pt",
                         )
                     else:
@@ -649,7 +665,6 @@ class FSDPSFTTrainer:
                             won = pred.lower() == answer.lower()
                             done = True
                             obs_text = ""
-                            # obs_image unchanged
                         elif action_str:
                             obs_text, obs_image, _, done, _ = env.step(action_str)
                         else:
