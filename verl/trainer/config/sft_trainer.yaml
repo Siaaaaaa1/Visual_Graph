@@ -22,6 +22,13 @@ data:
     path: null
     name: null
   use_shm: False
+  # RL-style per-epoch generation eval (set gen_eval_file to enable)
+  gen_eval_file: null             # path to test_slim.parquet
+  gen_eval_node_text_path: null   # path to {dataset}_text.json
+  gen_eval_dataset_name: cora
+  gen_eval_dataset_dir: ./datasets
+  gen_eval_n_samples: 64          # number of test samples per epoch eval
+  gen_eval_max_steps: 10          # max env interaction steps per sample
 model:
   partial_pretrain: ~/models/gemma-1.1-7b-it
   use_shm: False
