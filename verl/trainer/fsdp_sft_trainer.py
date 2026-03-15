@@ -544,10 +544,24 @@ class FSDPSFTTrainer:
             node_text_db = None
             shared_payload = None
 
-        # Determine eos token id (AutoProcessor wraps tokenizer)
-        eos_id = (self.tokenizer.tokenizer.eos_token_id
-                  if hasattr(self.tokenizer, "tokenizer")
-                  else self.tokenizer.eos_token_id)
+        # For VLM generation eval, need AutoProcessor (image + text).
+        # The SFT tokenizer may be text-only; load a processor lazily.
+        if is_vlm:
+            if not hasattr(self, "_gen_eval_processor"):
+                from transformers import AutoProcessor
+                local_model_path = copy_to_local(src=self.config.model.partial_pretrain, verbose=False)
+                self._gen_eval_processor = AutoProcessor.from_pretrained(
+                    local_model_path,
+                    trust_remote_code=self.config.model.trust_remote_code,
+                )
+            proc = self._gen_eval_processor
+        else:
+            proc = self.tokenizer
+
+        # Determine eos token id
+        eos_id = (proc.tokenizer.eos_token_id
+                  if hasattr(proc, "tokenizer")
+                  else proc.eos_token_id)
 
         FINAL_RE = re.compile(r"(?:final|submit)\((.+?)\)", re.IGNORECASE)
         ACTION_RE = re.compile(r"<action>(.*?)</action>", re.DOTALL)
@@ -600,17 +614,17 @@ class FSDPSFTTrainer:
                     conv.append({"role": "user", "content": obs_text})
 
                     # ── tokenize (all ranks) ───────────────────────────────
-                    text_prompt = self.tokenizer.apply_chat_template(
+                    text_prompt = proc.apply_chat_template(
                         conv, add_generation_prompt=True, tokenize=False
                     )
                     if is_vlm:
-                        inputs = self.tokenizer(
+                        inputs = proc(
                             text=text_prompt,
                             images=[img_pil],
                             return_tensors="pt",
                         )
                     else:
-                        inputs = self.tokenizer(text_prompt, return_tensors="pt")
+                        inputs = proc(text_prompt, return_tensors="pt")
                     inputs = {k: v.to(self.device_name) for k, v in inputs.items()}
 
                     # ── generate (ALL ranks participate) ───────────────────
@@ -621,7 +635,7 @@ class FSDPSFTTrainer:
                         pad_token_id=eos_id,
                     )
                     input_len = inputs["input_ids"].shape[1]
-                    response_text = self.tokenizer.decode(
+                    response_text = proc.decode(
                         output_ids[0][input_len:], skip_special_tokens=True
                     )
 
