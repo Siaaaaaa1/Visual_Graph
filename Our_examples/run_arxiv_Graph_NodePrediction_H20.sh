@@ -1,7 +1,7 @@
 set -x
 # --- 1. 显存碎片优化 (保持开启) ---
 export VLLM_USE_V1=1
-export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 # 建议开启异步数据预取，减少 GPU 等待
 export VERL_PPO_ASYNC_ROLLOUT=1 
 

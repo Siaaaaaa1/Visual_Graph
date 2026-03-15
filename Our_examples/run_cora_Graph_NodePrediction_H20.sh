@@ -1,7 +1,7 @@
 set -x
 # --- 1. 显存碎片优化 (保持开启) ---
 export VLLM_USE_V1=1
-export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export WANDB_API_KEY="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"
 export MASTER_ADDRESS=$(ip route get 1.1.1.1 | grep -oP 'src \K\S+')
 export WORLD_SIZE=8

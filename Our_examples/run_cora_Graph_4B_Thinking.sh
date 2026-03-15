@@ -1,7 +1,7 @@
 set -x
 # --- 1. 基础环境设置 ---
 export VLLM_USE_V1=1
-export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VERL_PPO_ASYNC_ROLLOUT=1 
 
 # [删除] 这一行会导致 vLLM 启动崩溃，必须删掉

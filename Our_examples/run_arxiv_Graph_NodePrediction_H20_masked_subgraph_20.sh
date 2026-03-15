@@ -1,7 +1,7 @@
 set -x
 # --- 1. 基础环境设置 ---
 export VLLM_USE_V1=1
-export VLLM_ATTENTION_BACKEND=FLASHINFER
+export VLLM_ATTENTION_BACKEND=FLASH_ATTN
 export VERL_PPO_ASYNC_ROLLOUT=1 
 
 export WANDB_API_KEY="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"
