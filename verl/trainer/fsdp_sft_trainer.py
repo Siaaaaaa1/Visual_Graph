@@ -23,9 +23,12 @@ import os
 os.environ["NCCL_DEBUG"] = "WARN"
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+import json
 import logging
 import re
 from contextlib import nullcontext
+
+import numpy as np
 
 import hydra
 import torch
@@ -501,6 +504,180 @@ class FSDPSFTTrainer:
                 loss /= self.ulysses_device_mesh.size(0)
         return loss
 
+    def generation_eval(self, tracking, global_step):
+        """RL-style per-epoch inference eval: run full env interaction with model.generate(),
+        parse final(Category) predictions, compute classification accuracy.
+
+        Requires config.data.gen_eval_file, gen_eval_node_text_path,
+        gen_eval_dataset_name, gen_eval_dataset_dir to be set.
+        Optional: gen_eval_n_samples (default 64), gen_eval_max_steps (default 10).
+        """
+        gen_eval_file = self.config.data.get("gen_eval_file", None)
+        node_text_path = self.config.data.get("gen_eval_node_text_path", None)
+        if gen_eval_file is None or node_text_path is None:
+            return
+
+        import pandas as pd
+        from PIL import Image
+        from agent_system.environments.env_package.graph_search.envs import GraphSearchEnv
+        from agent_system.environments.env_package.graph_search.graph_visualizer import GraphVisualizer
+
+        rank = self.device_mesh.get_rank()
+        is_vlm = self.config.model.get("is_vlm", False)
+        dataset_name = self.config.data.get("gen_eval_dataset_name", "cora")
+        dataset_dir = self.config.data.get("gen_eval_dataset_dir", "./datasets")
+        n_samples = self.config.data.get("gen_eval_n_samples", 64)
+        max_steps = self.config.data.get("gen_eval_max_steps", 10)
+
+        # All ranks read the test file (cheap, no GPU)
+        gen_eval_df = pd.read_parquet(gen_eval_file).head(n_samples).reset_index(drop=True)
+
+        # Load env resources on rank 0 only (pure CPU/Python)
+        if rank == 0:
+            with open(node_text_path, "r", encoding="utf-8") as f:
+                node_text_db = json.load(f)
+            g_data, r_adj, c_map = GraphVisualizer.load_graph_data(dataset_name, dataset_dir)
+            temp_viz = GraphVisualizer(dataset_name=dataset_name, dataset_dir=dataset_dir,
+                                       shared_data=(g_data, r_adj, c_map, None))
+            shared_payload = (g_data, r_adj, c_map, temp_viz.feat_matrix)
+        else:
+            node_text_db = None
+            shared_payload = None
+
+        # Determine eos token id (AutoProcessor wraps tokenizer)
+        eos_id = (self.tokenizer.tokenizer.eos_token_id
+                  if hasattr(self.tokenizer, "tokenizer")
+                  else self.tokenizer.eos_token_id)
+
+        FINAL_RE = re.compile(r"(?:final|submit)\((.+?)\)", re.IGNORECASE)
+        ACTION_RE = re.compile(r"<action>(.*?)</action>", re.DOTALL)
+
+        self.fsdp_model.eval()
+        correct = 0
+        total = 0
+
+        with torch.no_grad():
+            for _, row in gen_eval_df.iterrows():
+                center_id = int(row["center_id"])
+                answer = str(row["answer"])
+
+                # ── rank 0: init env and get first obs ──────────────────────
+                if rank == 0:
+                    env = GraphSearchEnv(max_steps=max_steps, node_text_db=node_text_db,
+                                         dataset_name=dataset_name, dataset_dir=dataset_dir,
+                                         shared_graph_data=shared_payload)
+                    obs_text, obs_image, _ = env.reset({"center_id": center_id, "answer": answer})
+                    # obs_image: numpy uint8 (768, 768, 3)
+                else:
+                    obs_text = ""
+                    obs_image = np.zeros((768, 768, 3), dtype=np.uint8)
+                    env = None
+
+                # Build initial conversation from test_slim system prompt + env obs
+                all_msgs = list(row["prompt"])
+                sys_msgs = [m for m in all_msgs if m.get("role") == "system"]
+                conv = sys_msgs  # may be empty if no system prompt
+
+                done = False
+                won = False
+
+                for _step in range(max_steps):
+                    # ── broadcast obs text from rank 0 ─────────────────────
+                    obs_bytes = obs_text.encode("utf-8") if rank == 0 else b""
+                    obs_len_t = torch.tensor([len(obs_bytes)], dtype=torch.long, device=self.device_name)
+                    torch.distributed.broadcast(obs_len_t, src=0)
+                    obs_buf = torch.zeros(obs_len_t[0].item(), dtype=torch.uint8, device=self.device_name)
+                    if rank == 0:
+                        obs_buf[:] = torch.frombuffer(obs_bytes, dtype=torch.uint8)
+                    torch.distributed.broadcast(obs_buf, src=0)
+                    obs_text = obs_buf.cpu().numpy().tobytes().decode("utf-8")
+
+                    # ── broadcast image from rank 0 ────────────────────────
+                    img_t = torch.from_numpy(obs_image if rank == 0 else np.zeros((768, 768, 3), dtype=np.uint8)).to(self.device_name)
+                    torch.distributed.broadcast(img_t, src=0)
+                    img_np = img_t.cpu().numpy().astype(np.uint8)
+                    img_pil = Image.fromarray(img_np)
+
+                    # Append env obs to conversation (all ranks)
+                    conv.append({"role": "user", "content": obs_text})
+
+                    # ── tokenize (all ranks) ───────────────────────────────
+                    text_prompt = self.tokenizer.apply_chat_template(
+                        conv, add_generation_prompt=True, tokenize=False
+                    )
+                    if is_vlm:
+                        inputs = self.tokenizer(
+                            text=text_prompt,
+                            images=[img_pil],
+                            return_tensors="pt",
+                        )
+                    else:
+                        inputs = self.tokenizer(text_prompt, return_tensors="pt")
+                    inputs = {k: v.to(self.device_name) for k, v in inputs.items()}
+
+                    # ── generate (ALL ranks participate) ───────────────────
+                    output_ids = self.fsdp_model.generate(
+                        **inputs,
+                        max_new_tokens=512,
+                        do_sample=False,
+                        pad_token_id=eos_id,
+                    )
+                    input_len = inputs["input_ids"].shape[1]
+                    response_text = self.tokenizer.decode(
+                        output_ids[0][input_len:], skip_special_tokens=True
+                    )
+
+                    # ── rank 0: step env ───────────────────────────────────
+                    if rank == 0:
+                        action_match = ACTION_RE.search(response_text)
+                        action_str = action_match.group(1).strip() if action_match else ""
+                        final_match = FINAL_RE.search(action_str)
+                        if final_match:
+                            pred = final_match.group(1).strip()
+                            won = pred.lower() == answer.lower()
+                            done = True
+                            obs_text = ""
+                            # obs_image unchanged
+                        elif action_str:
+                            obs_text, obs_image, _, done, _ = env.step(action_str)
+                        else:
+                            obs_text = "Invalid action format."
+                            done = (_step >= max_steps - 1)
+
+                    # ── sync done/won ──────────────────────────────────────
+                    done_t = torch.tensor([int(done), int(won)], dtype=torch.long, device=self.device_name)
+                    torch.distributed.broadcast(done_t, src=0)
+                    done = bool(done_t[0].item())
+                    won = bool(done_t[1].item())
+
+                    conv.append({"role": "assistant", "content": response_text})
+
+                    if done:
+                        break
+
+                if rank == 0:
+                    if won:
+                        correct += 1
+                    total += 1
+
+        # Broadcast stats from rank 0 (only rank 0 has correct/total)
+        stats = torch.tensor([correct, total], dtype=torch.long, device=self.device_name)
+        torch.distributed.broadcast(stats, src=0)
+
+        if rank == 0:
+            acc = stats[0].item() / max(stats[1].item(), 1)
+            metric = {
+                "test/gen_accuracy": acc,
+                "test/gen_correct": stats[0].item(),
+                "test/gen_total": stats[1].item(),
+            }
+            tracking.log(data=metric, step=global_step)
+            print(f"[GenEval step={global_step}] test/gen_accuracy={acc:.4f} "
+                  f"({stats[0].item()}/{stats[1].item()})")
+
+        torch.distributed.barrier()
+        self.fsdp_model.train()
+
     def save_checkpoint(self, step):
         # save checkpoint
         path = os.path.join(self.config.trainer.default_local_dir, f"global_step_{step}")
@@ -614,7 +791,7 @@ class FSDPSFTTrainer:
                 tracking.log(data=metric, step=global_step)
             torch.distributed.barrier()
 
-            # test evaluation
+            # test evaluation (cross-entropy loss, same as val)
             if self.test_dataloader is not None:
                 test_losses = []
                 for data in self.test_dataloader:
@@ -626,6 +803,9 @@ class FSDPSFTTrainer:
                     metric = {"test/loss": test_loss.detach().item()}
                     tracking.log(data=metric, step=global_step)
                 torch.distributed.barrier()
+
+            # RL-style generation eval: actual inference + env interaction → accuracy
+            self.generation_eval(tracking if rank == 0 else None, global_step)
 
             # save checkpoint
             self.save_checkpoint(step=global_step)

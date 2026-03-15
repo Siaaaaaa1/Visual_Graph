@@ -78,4 +78,10 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 \
         trainer.save_freq=50 \
         trainer.test_freq=50 \
         trainer.logger=['console','wandb'] \
-        optim.lr=2e-5
+        optim.lr=2e-5 \
+        data.gen_eval_file="./datasets/${DATASET}_test_slim.parquet" \
+        data.gen_eval_node_text_path="./datasets/${DATASET}_text.json" \
+        data.gen_eval_dataset_name="${DATASET}" \
+        data.gen_eval_dataset_dir="./datasets" \
+        data.gen_eval_n_samples=64 \
+        data.gen_eval_max_steps=10
