@@ -574,7 +574,10 @@ class FSDPSFTTrainer:
                     env = None
 
                 # Build initial conversation from test_slim system prompt + env obs
-                all_msgs = list(row["prompt"])
+                raw_prompt = row["prompt"]
+                if isinstance(raw_prompt, str):
+                    raw_prompt = json.loads(raw_prompt)
+                all_msgs = list(raw_prompt)
                 sys_msgs = [m for m in all_msgs if m.get("role") == "system"]
                 conv = sys_msgs  # may be empty if no system prompt
 
