@@ -28,8 +28,8 @@ else
         --dataset ${DATASET} \
         --num_tasks 100000 \
         --dataset_dir datasets \
-        --max_hard_per_class 0 \
         --max_easy_per_class 200 \
+        --hard_ratio 1.0 \
         --trajectories_per_node 3 \
         --max_attempts 15
 fi

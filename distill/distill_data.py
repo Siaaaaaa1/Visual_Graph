@@ -38,16 +38,17 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--dataset", type=str, required=True, choices=["cora", "pubmed", "arxiv"])
 parser.add_argument("--num_tasks", type=int, default=100000)
 parser.add_argument("--dataset_dir", type=str, default="datasets")
-parser.add_argument("--max_hard_per_class", type=int, default=0,
-                    help="每个类别困难样本（首次成功 attempt > INITIAL_MAX_ATTEMPTS）的保留上限（0=不限）。"
-                         "建议设为 0 以尽量保留所有困难样本，提升模型解决难题的能力。")
 parser.add_argument("--max_easy_per_class", type=int, default=200,
-                    help="每个类别简单样本（首次成功 attempt <= INITIAL_MAX_ATTEMPTS）的保留上限。"
-                         "设得过高会导致简单样本淹没困难样本；建议为 max_hard_per_class 的 30-50%%。")
+                    help="每个类别简单样本（首次成功 attempt <= INITIAL_MAX_ATTEMPTS）的保留上限。")
+parser.add_argument("--hard_ratio", type=float, default=1.0,
+                    help="hard 总量相对 easy 总量的上限比例：total_hard <= hard_ratio × total_easy。"
+                         "设为 0 表示不限（慎用）。默认 1.0，即 hard 与 easy 总数相等。")
 parser.add_argument("--trajectories_per_node", type=int, default=3,
                     help="每个节点最多收集的成功轨迹数。多条轨迹 = 同一问题的多种推理路径 = 更高多样性。")
 parser.add_argument("--max_attempts", type=int, default=15,
                     help="每个节点的最大总尝试次数。超过后若仍无成功则放弃，并写入 debug 文件。")
+parser.add_argument("--stale_stop", type=int, default=100,
+                    help="连续多少个成功节点全被配额拒绝后触发早停（easy 和 hard 均满时自然触发）。默认 100。")
 args = parser.parse_args()
 
 INITIAL_MAX_ATTEMPTS = 8
@@ -105,7 +106,7 @@ def _is_valid_step(assistant_text: str) -> bool:
 # ================= 5. 数据预加载 =================
 def prepare_shared_assets(dataset_name, dataset_dir):
     logger.info(f"Loading shared assets for dataset: {dataset_name}")
-    
+
     test_parquet_path = os.path.join(dataset_dir, f"{dataset_name}_test_slim.parquet")
     test_ids = set()
     if os.path.exists(test_parquet_path):
@@ -445,8 +446,9 @@ async def main_async():
     logger.info(f"Starting distillation | concurrency={TASK_CONCURRENCY} | pending={total} nodes")
     logger.info(f"   trajectories_per_node={args.trajectories_per_node} | "
                 f"max_attempts={args.max_attempts} | "
-                f"max_hard/class={args.max_hard_per_class or 'unlimited'} | "
-                f"max_easy/class={args.max_easy_per_class}")
+                f"hard_ratio={args.hard_ratio or 'unlimited'} | "
+                f"max_easy/class={args.max_easy_per_class} | "
+                f"stale_stop={args.stale_stop}")
 
     # ── 4. 并发控制与线程池 ──
     task_sem  = asyncio.Semaphore(TASK_CONCURRENCY)          # 任务级并发上限
@@ -458,6 +460,7 @@ async def main_async():
     failed_node_count = 0
     hard_class_counts: dict = {}
     easy_class_counts: dict = {}
+    stale_count = 0  # 连续成功但被配额拒绝的节点数
 
     def _save_entry(entry: dict, f_data) -> bool:
         """将单条轨迹写入训练文件，返回是否实际保存（配额未满）"""
@@ -469,8 +472,12 @@ async def main_async():
         is_hard = success_rate < 0.5
 
         if is_hard:
-            if args.max_hard_per_class > 0 and hard_class_counts.get(node_class, 0) >= args.max_hard_per_class:
-                return False
+            # 全局 hard 总量不超过 hard_ratio × easy 总量
+            if args.hard_ratio > 0:
+                total_hard = sum(hard_class_counts.values())
+                total_easy = sum(easy_class_counts.values())
+                if total_hard >= args.hard_ratio * max(total_easy, 1):
+                    return False
         else:
             if easy_class_counts.get(node_class, 0) >= args.max_easy_per_class:
                 return False
@@ -564,8 +571,27 @@ async def main_async():
                     logger.info(
                         f"[{done_count}/{total}] OK node={node_id} class={node_class} "
                         f"({difficulty} sr={sr:.2f}) | saved {saved_this}/{len(trajs)} "
-                        f"| total={saved_traj_count} (failed_nodes={failed_node_count})"
+                        f"| total={saved_traj_count} hard={sum(hard_class_counts.values())} "
+                        f"easy={sum(easy_class_counts.values())} (failed_nodes={failed_node_count})"
                     )
+
+                    # stale 追踪：成功节点但全被配额拒绝 → 计数
+                    if saved_this == 0:
+                        stale_count += 1
+                    else:
+                        stale_count = 0
+
+                # ── early-stop：连续 stale_stop 个成功节点均被拒绝 ──
+                if stale_count >= args.stale_stop:
+                    remaining = sum(1 for f in futures if not f.done())
+                    logger.info(
+                        f"[EarlyStop] 连续 {stale_count} 个成功节点全被配额拒绝，"
+                        f"hard/easy 配额均已满 → 取消剩余 {remaining} 个任务"
+                    )
+                    for f in futures:
+                        if not f.done():
+                            f.cancel()
+                    break
 
     except KeyboardInterrupt:
         logger.info("Interrupted by user.")

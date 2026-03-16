@@ -76,7 +76,7 @@ torchrun --standalone --nnodes=1 --nproc_per_node=8 \
         trainer.experiment_name=sft-${DATASET} \
         trainer.total_epochs=10 \
         trainer.save_freq=50 \
-        trainer.test_freq=50 \
+        trainer.test_freq=30 \
         trainer.logger=['console','wandb'] \
         optim.lr=2e-5 \
         data.gen_eval_file="./datasets/${DATASET}_test_slim.parquet" \

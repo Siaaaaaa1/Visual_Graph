@@ -18,70 +18,66 @@ fi
 DATASET_DIR="datasets"
 
 # -------- 蒸馏参数 --------
-# trajectories_per_node  : 每个节点最多收集的成功轨迹数（多条 = 多种推理路径 = 更高多样性）
-# max_attempts           : 每个节点的总尝试上限，超过后放弃并写入 debug_failures.jsonl
-#
-# max_hard_per_class     : 困难样本（首次成功 attempt > 5）每类上限（0=不限，尽量全收）
-#                          困难样本是模型能力提升的核心，不应被过度截断
-# max_easy_per_class     : 简单样本（首次成功 attempt <= 5）每类上限
-#                          保留适量简单样本防止遗忘基础技能，但不能淹没困难样本
+# hard_ratio      : hard 总量 / easy 总量的上限比例
+#                   cora/arxiv=1.0（1:1），pubmed=0.5（hard 为 easy 的一半）
+#                   配合 stale_stop，所有配额满后自动取消剩余任务
+# max_easy_per_class : 每类简单样本上限
+# stale_stop      : 连续 N 个成功节点全被拒绝时触发 early-stop（安全网）
 #
 # 数据量估算（trajectories_per_node=3）：
-#   cora  (~7 类,  ~2708 节点): 困难样本不限 + 简单 100/类  → 困难优先全量收集
-#   pubmed (~3 类, ~19717 节点): 困难样本不限 + 简单 500/类  → 困难优先全量收集
-#   arxiv (~40 类, ~169343 节点): 困难样本不限 + 简单 200/类 → 困难优先全量收集
+#   cora  (~7 类,  ~2708 节点): easy=700  hard≤700  total≤1400
+#   pubmed (~3 类, ~19717 节点): easy=1500 hard≤750  total≤2250
+#   arxiv (~40 类, ~169343 节点): easy=8000 hard≤8000 total≤16000
 
 TRAJECTORIES_PER_NODE=3
 MAX_ATTEMPTS=15
 
-# 困难样本不设上限（0=不限）
-CORA_MAX_HARD_PER_CLASS=0
-PUBMED_MAX_HARD_PER_CLASS=0
-ARXIV_MAX_HARD_PER_CLASS=0
-
-# 简单样本适量保留（约为预期困难样本量的 30-50%）
 CORA_MAX_EASY_PER_CLASS=100
 PUBMED_MAX_EASY_PER_CLASS=500
 ARXIV_MAX_EASY_PER_CLASS=200
 
+CORA_HARD_RATIO=1.0
+PUBMED_HARD_RATIO=0.5
+ARXIV_HARD_RATIO=1.0
+
 echo "========================================================"
 echo "[START] 启动异步蒸馏 (执行路径: $(pwd))"
-echo "  策略：困难样本不限量全收，简单样本适量保留"
+echo "  策略：easy 每类限额，hard 按全局比例限制，超额自动停止"
 echo "========================================================"
 
-# 1. 蒸馏 cora（小数据集，困难样本全量，简单样本每类 ${CORA_MAX_EASY_PER_CLASS} 条）
+# 1. 蒸馏 cora
 echo "--------------------------------------------------------"
-echo "[PROCESS] 1/3: 蒸馏 cora（hard=不限, easy/class=${CORA_MAX_EASY_PER_CLASS}, traj/node=${TRAJECTORIES_PER_NODE}）"
+echo "[PROCESS] 1/3: 蒸馏 cora（hard_ratio=${CORA_HARD_RATIO}, easy/class=${CORA_MAX_EASY_PER_CLASS}）"
 python distill/distill_data.py \
     --dataset cora \
     --num_tasks 100000 \
     --dataset_dir ${DATASET_DIR} \
-    --max_hard_per_class ${CORA_MAX_HARD_PER_CLASS} \
     --max_easy_per_class ${CORA_MAX_EASY_PER_CLASS} \
+    --hard_ratio ${CORA_HARD_RATIO} \
     --trajectories_per_node ${TRAJECTORIES_PER_NODE} \
     --max_attempts ${MAX_ATTEMPTS}
 
 # 2. 蒸馏 pubmed
 echo "--------------------------------------------------------"
-echo "[PROCESS] 2/3: 蒸馏 pubmed（hard=不限, easy/class=${PUBMED_MAX_EASY_PER_CLASS}, traj/node=${TRAJECTORIES_PER_NODE}）"
+echo "[PROCESS] 2/3: 蒸馏 pubmed（hard_ratio=${PUBMED_HARD_RATIO}, easy/class=${PUBMED_MAX_EASY_PER_CLASS}）"
 python distill/distill_data.py \
     --dataset pubmed \
     --num_tasks 100000 \
     --dataset_dir ${DATASET_DIR} \
-    --max_hard_per_class ${PUBMED_MAX_HARD_PER_CLASS} \
     --max_easy_per_class ${PUBMED_MAX_EASY_PER_CLASS} \
+    --hard_ratio ${PUBMED_HARD_RATIO} \
     --trajectories_per_node ${TRAJECTORIES_PER_NODE} \
     --max_attempts ${MAX_ATTEMPTS}
 
-# 3. 蒸馏 arxiv（大数据集，困难样本不限，简单样本每类 ${ARXIV_MAX_EASY_PER_CLASS} 条）
+# 3. 蒸馏 arxiv
 echo "--------------------------------------------------------"
-echo "[PROCESS] 3/3: 蒸馏 arxiv（hard=不限, easy/class=${ARXIV_MAX_EASY_PER_CLASS}, traj/node=${TRAJECTORIES_PER_NODE}）"
+echo "[PROCESS] 3/3: 蒸馏 arxiv（hard_ratio=${ARXIV_HARD_RATIO}, easy/class=${ARXIV_MAX_EASY_PER_CLASS}）"
 python distill/distill_data.py \
     --dataset arxiv \
     --num_tasks 100000 \
     --dataset_dir ${DATASET_DIR} \
-    --max_hard_per_class ${ARXIV_MAX_HARD_PER_CLASS} \
     --max_easy_per_class ${ARXIV_MAX_EASY_PER_CLASS} \
+    --hard_ratio ${ARXIV_HARD_RATIO} \
     --trajectories_per_node ${TRAJECTORIES_PER_NODE} \
     --max_attempts ${MAX_ATTEMPTS}
 

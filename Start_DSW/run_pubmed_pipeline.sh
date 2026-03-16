@@ -28,8 +28,8 @@ else
         --dataset ${DATASET} \
         --num_tasks 100000 \
         --dataset_dir datasets \
-        --max_hard_per_class 0 \
         --max_easy_per_class 500 \
+        --hard_ratio 0.5 \
         --trajectories_per_node 3 \
         --max_attempts 15
 fi
@@ -41,14 +41,15 @@ echo "[INFO] 步骤 2/3: 开始 SFT 训练..."
 bash distill/run_sft_${DATASET}.sh
 
 # ==========================================
-# 3. 查找最新 SFT checkpoint
+# 3. 查找最优 SFT checkpoint（按 gen_accuracy 选择）
 # ==========================================
-SFT_CKPT=$(ls -d ./checkpoints/sft_${DATASET}/global_step_* 2>/dev/null | sort -V | tail -1)
-if [ -z "${SFT_CKPT}" ]; then
-    echo "[ERROR] 未找到 SFT checkpoint，请检查 SFT 训练是否成功。"
+BEST_CKPT_FILE="./checkpoints/sft_${DATASET}/best_checkpoint.txt"
+if [ ! -f "${BEST_CKPT_FILE}" ]; then
+    echo "[ERROR] 未找到 ${BEST_CKPT_FILE}，请检查 SFT 训练是否成功。"
     exit 1
 fi
-echo "[INFO] 使用 SFT checkpoint: ${SFT_CKPT}"
+SFT_CKPT=$(cat "${BEST_CKPT_FILE}")
+echo "[INFO] 使用最优 SFT checkpoint (by gen_accuracy): ${SFT_CKPT}"
 
 # ==========================================
 # 3. RL 阶段（接续 SFT 权重）

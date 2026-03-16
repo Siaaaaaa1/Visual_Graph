@@ -691,8 +691,8 @@ class FSDPSFTTrainer:
         stats = torch.tensor([correct, total], dtype=torch.long, device=self.device_name)
         torch.distributed.broadcast(stats, src=0)
 
+        acc = stats[0].item() / max(stats[1].item(), 1)
         if rank == 0:
-            acc = stats[0].item() / max(stats[1].item(), 1)
             metric = {
                 "test/gen_accuracy": acc,
                 "test/gen_correct": stats[0].item(),
@@ -704,6 +704,26 @@ class FSDPSFTTrainer:
 
         torch.distributed.barrier()
         self.fsdp_model.train()
+        return acc
+
+    def _save_vlm_processor(self, path):
+        """Save the full AutoProcessor (including image processor) to the checkpoint path.
+
+        VLM checkpoints need preprocessor_config.json etc. so that vLLM and
+        downstream loaders can find the image processor.  The processor is
+        loaded once from the original pretrained directory and then saved into
+        every checkpoint directory.
+        """
+        from transformers import AutoProcessor
+        from verl.utils.fs import copy_to_local
+
+        if not hasattr(self, "_vlm_processor"):
+            local_model_path = copy_to_local(src=self.config.model.partial_pretrain, verbose=False)
+            self._vlm_processor = AutoProcessor.from_pretrained(
+                local_model_path,
+                trust_remote_code=self.config.model.get("trust_remote_code", False),
+            )
+        self._vlm_processor.save_pretrained(path)
 
     def save_checkpoint(self, step):
         # save checkpoint
@@ -723,6 +743,8 @@ class FSDPSFTTrainer:
                 os.makedirs(path, exist_ok=True)
                 self.model.save_pretrained(path, state_dict=state_dict)
                 self.tokenizer.save_pretrained(path)
+                if self.config.model.get("is_vlm", False):
+                    self._save_vlm_processor(path)
         elif fsdp_strategy == "fsdp2":
             # FSDP2 checkpoint saving
             from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict
@@ -737,6 +759,8 @@ class FSDPSFTTrainer:
                 self.model.save_pretrained(path, state_dict=state_dict)
                 self.model_config.save_pretrained(path)
                 self.tokenizer.save_pretrained(path)
+                if self.config.model.get("is_vlm", False):
+                    self._save_vlm_processor(path)
         else:
             raise NotImplementedError(f"not implement {fsdp_strategy}")
 
@@ -759,8 +783,10 @@ class FSDPSFTTrainer:
             )
 
         global_step = 0
-        best_val_loss = float("inf")
+        best_gen_accuracy = -1.0
         best_ckpt_step = None
+        gen_eval_freq = self.config.trainer.get("test_freq", 30)
+        gen_eval_file = self.config.data.get("gen_eval_file", None)
         # compute the total training steps.
         # the total training steps in SFT is mainly for early exit
         total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
@@ -787,6 +813,21 @@ class FSDPSFTTrainer:
                 metric = self.training_step(data)
                 if rank == 0:
                     tracking.log(data=metric, step=global_step)
+
+                # gen eval every gen_eval_freq steps (accuracy-based best checkpoint)
+                if gen_eval_file is not None and global_step % gen_eval_freq == 0:
+                    gen_acc = self.generation_eval(tracking if rank == 0 else None, global_step)
+                    if gen_acc > best_gen_accuracy:
+                        best_gen_accuracy = gen_acc
+                        best_ckpt_step = global_step
+                        self.save_checkpoint(step=global_step)
+                        if rank == 0:
+                            ckpt_path = os.path.join(self.config.trainer.default_local_dir, f"global_step_{global_step}")
+                            best_ckpt_file = os.path.join(self.config.trainer.default_local_dir, "best_checkpoint.txt")
+                            with open(best_ckpt_file, "w") as f:
+                                f.write(ckpt_path)
+                            print(f"[BestCkpt] New best gen_accuracy={best_gen_accuracy:.4f} at step {global_step} → {ckpt_path}")
+                        torch.distributed.barrier()
 
                 # for early exit validation
                 if global_step >= self.total_training_steps:
@@ -831,23 +872,8 @@ class FSDPSFTTrainer:
                     tracking.log(data=metric, step=global_step)
                 torch.distributed.barrier()
 
-            # RL-style generation eval: actual inference + env interaction → accuracy
-            self.generation_eval(tracking if rank == 0 else None, global_step)
-
-            # save checkpoint
+            # save checkpoint at every epoch end for recovery / inspection
             self.save_checkpoint(step=global_step)
-
-            # track best checkpoint by val loss
-            current_val_loss = val_loss_tensor.item()
-            if current_val_loss < best_val_loss:
-                best_val_loss = current_val_loss
-                best_ckpt_step = global_step
-                if rank == 0:
-                    ckpt_path = os.path.join(self.config.trainer.default_local_dir, f"global_step_{global_step}")
-                    best_ckpt_file = os.path.join(self.config.trainer.default_local_dir, "best_checkpoint.txt")
-                    with open(best_ckpt_file, "w") as f:
-                        f.write(ckpt_path)
-                    print(f"[BestCkpt] New best val_loss={best_val_loss:.4f} at step {global_step} → {ckpt_path}")
             torch.distributed.barrier()
 
 
